@@ -1,6 +1,6 @@
 /**
  * test_Yann profile only: Name editor with a live 10-character cap.
- * Extra input is rejected and Hub shows an alert. Does not touch other types.
+ * Handlers run in the widget HTML (sandbox JS cannot see the input). Does not touch other types.
  */
 (function () {
     var MAX_LEN = 10;
@@ -10,7 +10,6 @@
         "Name is limited to 10 characters. The extra character was not added.";
     var currentName = "";
     var nameMeta = null;
-    var limitAlertOpen = false;
 
     function isTestYann(entity) {
         return !!(entity && entity.type === ENTITY_TYPE);
@@ -28,12 +27,11 @@
             .replace(/"/g, "&quot;");
     }
 
-    function getNameInput() {
-        try {
-            return typeof document !== "undefined" ? document.getElementById("testYannName") : null;
-        } catch (e) {
-            return null;
-        }
+    function escapeAttr(value) {
+        return String(value)
+            .replace(/&/g, "&amp;")
+            .replace(/"/g, "&quot;")
+            .replace(/</g, "&lt;");
     }
 
     function nameFromEntity(entity) {
@@ -71,81 +69,45 @@
         );
     }
 
-    function showLimitAlert() {
-        if (limitAlertOpen) {
-            return;
-        }
-        limitAlertOpen = true;
-        var done = function () {
-            limitAlertOpen = false;
-        };
-        try {
-            var pending = UI.alert(LIMIT_MESSAGE);
-            if (pending && typeof pending.then === "function") {
-                pending.then(done, done);
-                return;
-            }
-        } catch (e) {
-            /* ignore */
-        }
-        done();
-    }
-
-    function syncInputValue() {
-        var input = getNameInput();
-        if (input) {
-            input.value = currentName;
-            return;
-        }
-        render();
-    }
-
-    function applyNameValue(next) {
-        var raw = String(next == null ? "" : next);
-        if (raw.length > MAX_LEN) {
-            currentName = clip(raw);
-            syncInputValue();
-            UI.setChildHtml("testYannNameHint", counterHtml());
-            showLimitAlert();
-            return;
-        }
-        currentName = raw;
-        UI.setChildHtml("testYannNameHint", counterHtml());
-    }
-
-    function bindNameInput() {
-        var input = getNameInput();
-        if (!input || input.getAttribute("data-ty-bound") === "1") {
-            return;
-        }
-        input.setAttribute("data-ty-bound", "1");
-        input.addEventListener("keydown", function (event) {
-            if (!event || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {
-                return;
-            }
-            if (typeof event.key === "string" && event.key.length === 1) {
-                var start = input.selectionStart || 0;
-                var end = input.selectionEnd || 0;
-                if (input.value.length - (end - start) >= MAX_LEN) {
-                    event.preventDefault();
-                    showLimitAlert();
-                }
-            }
-        });
-        input.addEventListener("input", function () {
-            applyNameValue(input.value);
-        });
-        input.addEventListener("paste", function (event) {
-            var clipData = event.clipboardData || (typeof window !== "undefined" && window.clipboardData);
-            var text = clipData ? clipData.getData("text") || clipData.getData("Text") || "" : "";
-            var start = input.selectionStart || 0;
-            var end = input.selectionEnd || 0;
-            var next = input.value.slice(0, start) + text + input.value.slice(end);
-            if (next.length > MAX_LEN) {
-                event.preventDefault();
-                applyNameValue(next);
-            }
-        });
+    function inputHandlers() {
+        return (
+            "onkeydown=\"" +
+            escapeAttr(
+                "var e=event||window.event;" +
+                    "if(e.ctrlKey||e.metaKey||e.altKey||e.isComposing)return;" +
+                    "var key=e.key||String.fromCharCode(e.which||e.keyCode||0);" +
+                    "if(!key||key.length!==1)return;" +
+                    "var el=this,s=el.selectionStart||0,n=el.selectionEnd||0;" +
+                    "if(el.value.length-(n-s)>=10){" +
+                    "if(e.preventDefault)e.preventDefault();else e.returnValue=false;" +
+                    "alert('" +
+                    LIMIT_MESSAGE.replace(/'/g, "\\'") +
+                    "');}"
+            ) +
+            "\" oninput=\"" +
+            escapeAttr(
+                "var el=this,c=document.getElementById('testYannNameCount');" +
+                    "if(el.value.length>10)el.value=el.value.slice(0,10);" +
+                    "if(c){c.textContent=el.value.length+' / 10';c.style.color=el.value.length>=10?'#b42318':'#6a6d70';}"
+            ) +
+            "\" onpaste=\"" +
+            escapeAttr(
+                "var e=event||window.event,el=this;" +
+                    "var t=(e.clipboardData||window.clipboardData);" +
+                    "t=t?(t.getData('text')||t.getData('Text')||''):'';" +
+                    "var s=el.selectionStart||0,n=el.selectionEnd||0;" +
+                    "var next=el.value.slice(0,s)+t+el.value.slice(n);" +
+                    "if(next.length>10){" +
+                    "if(e.preventDefault)e.preventDefault();else e.returnValue=false;" +
+                    "el.value=next.slice(0,10);" +
+                    "var c=document.getElementById('testYannNameCount');" +
+                    "if(c){c.textContent=el.value.length+' / 10';c.style.color='#b42318';}" +
+                    "alert('" +
+                    LIMIT_MESSAGE.replace(/'/g, "\\'") +
+                    "');}"
+            ) +
+            "\""
+        );
     }
 
     function render() {
@@ -157,10 +119,14 @@
                 counterHtml() +
                 "</div>" +
                 "</div>" +
-                '<input id="testYannName" type="text" autocomplete="off" spellcheck="false" data-action="input" value="' +
+                '<input id="testYannName" type="text" maxlength="' +
+                MAX_LEN +
+                '" autocomplete="off" spellcheck="false" data-action="input" ' +
+                inputHandlers() +
+                ' value="' +
                 escapeHtml(currentName) +
                 '" />' +
-                "<p class=\"ty-help\">Maximum 10 characters. An alert is shown if you try to enter more.</p>" +
+                '<p class="ty-help">Maximum 10 characters. Extra characters are blocked and an alert is shown.</p>' +
                 "</div>" +
                 "<style>" +
                 ".ty-name{font-family:Roboto,Helvetica,Arial,sans-serif;color:#1d232a;padding:12px 16px 8px;box-sizing:border-box;}" +
@@ -173,31 +139,6 @@
                 ".ty-help{margin:8px 0 0;font-size:12px;line-height:16px;color:#6a6d70;}" +
                 "</style>"
         );
-        bindNameInput();
-    }
-
-    function valueFromUiAction(data) {
-        if (!data) {
-            return currentName;
-        }
-        if (data.value != null) {
-            return data.value;
-        }
-        if (data.event && data.event.target && data.event.target.value != null) {
-            return data.event.target.value;
-        }
-        return currentName;
-    }
-
-    function isNameInput(data) {
-        if (!data) {
-            return false;
-        }
-        var id = data.id || data.elementId;
-        if (!id && data.event && data.event.target) {
-            id = data.event.target.id;
-        }
-        return id === "testYannName";
     }
 
     function nameAttribute() {
@@ -211,11 +152,31 @@
         return next;
     }
 
+    function extractUiValue(data) {
+        data = parseData(data);
+        if (!data || typeof data !== "object") {
+            return null;
+        }
+        if (data.value != null) {
+            return String(data.value);
+        }
+        var target = data.target || (data.event && (data.event.target || data.event.srcElement));
+        if (target && target.value != null) {
+            return String(target.value);
+        }
+        return null;
+    }
+
     function injectEntity(entity) {
         if (!isTestYann(entity)) {
             return;
         }
         entity.attributes = entity.attributes || {};
+        var existing = entity.attributes.Name && entity.attributes.Name[0];
+        if (existing && existing.value != null) {
+            existing.value = clip(existing.value);
+            return;
+        }
         entity.attributes.Name = [nameAttribute()];
     }
 
@@ -266,8 +227,11 @@
             }
             return;
         }
-        if (type === "uiAction" && isNameInput(data)) {
-            applyNameValue(valueFromUiAction(data));
+        if (type === "uiAction") {
+            var typed = extractUiValue(data);
+            if (typed != null) {
+                currentName = clip(typed);
+            }
         }
     });
 
