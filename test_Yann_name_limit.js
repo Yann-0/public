@@ -1,6 +1,6 @@
 /**
- * test_Yann profile only: Name editor with a live 10-character cap and Hub-like styling.
- * At 10 characters, further input is blocked and Hub shows an alert. Does not touch other types.
+ * test_Yann profile only: Name editor with a live 10-character cap.
+ * Extra input is rejected and Hub shows an alert. Does not touch other types.
  */
 (function () {
     var MAX_LEN = 10;
@@ -26,6 +26,14 @@
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;")
             .replace(/"/g, "&quot;");
+    }
+
+    function getNameInput() {
+        try {
+            return typeof document !== "undefined" ? document.getElementById("testYannName") : null;
+        } catch (e) {
+            return null;
+        }
     }
 
     function nameFromEntity(entity) {
@@ -78,119 +86,81 @@
                 return;
             }
         } catch (e) {
-            /* fall through */
+            /* ignore */
         }
         done();
     }
 
-    function eventFrom(data) {
-        return (data && data.event) || data || {};
+    function syncInputValue() {
+        var input = getNameInput();
+        if (input) {
+            input.value = currentName;
+            return;
+        }
+        render();
     }
 
-    function nameInputFrom(data) {
-        var event = eventFrom(data);
-        if (event.target && event.target.id === "testYannName") {
-            return event.target;
+    function applyNameValue(next) {
+        var raw = String(next == null ? "" : next);
+        if (raw.length > MAX_LEN) {
+            currentName = clip(raw);
+            syncInputValue();
+            UI.setChildHtml("testYannNameHint", counterHtml());
+            showLimitAlert();
+            return;
         }
-        if (typeof document !== "undefined") {
-            return document.getElementById("testYannName");
-        }
-        return null;
-    }
-
-    function allowedInsertLength(input) {
-        var value = input && input.value != null ? String(input.value) : currentName;
-        var start = input && typeof input.selectionStart === "number" ? input.selectionStart : value.length;
-        var end = input && typeof input.selectionEnd === "number" ? input.selectionEnd : value.length;
-        return Math.max(0, MAX_LEN - (value.length - (end - start)));
-    }
-
-    function isPrintableKey(event) {
-        if (!event) {
-            return false;
-        }
-        if (event.ctrlKey || event.metaKey || event.altKey) {
-            return false;
-        }
-        if (event.isComposing || event.keyCode === 229) {
-            return false;
-        }
-        if (typeof event.key === "string") {
-            return event.key.length === 1;
-        }
-        var code = event.which || event.keyCode;
-        return code >= 32 && code <= 126;
-    }
-
-    function clipboardText(event) {
-        var clip = event && (event.clipboardData || (typeof window !== "undefined" && window.clipboardData));
-        if (!clip) {
-            return "";
-        }
-        return clip.getData("text") || clip.getData("Text") || "";
-    }
-
-    function blockExtraInput(event, insertLen) {
-        var input = event && event.target && event.target.id === "testYannName" ? event.target : nameInputFrom({ event: event });
-        if (allowedInsertLength(input) >= insertLen) {
-            return false;
-        }
-        if (event && typeof event.preventDefault === "function") {
-            event.preventDefault();
-        }
-        showLimitAlert();
-        return true;
+        currentName = raw;
+        UI.setChildHtml("testYannNameHint", counterHtml());
     }
 
     function bindNameInput() {
-        var input;
-        try {
-            input = typeof document !== "undefined" ? document.getElementById("testYannName") : null;
-        } catch (e) {
-            return;
-        }
+        var input = getNameInput();
         if (!input || input.getAttribute("data-ty-bound") === "1") {
             return;
         }
         input.setAttribute("data-ty-bound", "1");
         input.addEventListener("keydown", function (event) {
-            if (isPrintableKey(event)) {
-                blockExtraInput(event, 1);
+            if (!event || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {
+                return;
+            }
+            if (typeof event.key === "string" && event.key.length === 1) {
+                var start = input.selectionStart || 0;
+                var end = input.selectionEnd || 0;
+                if (input.value.length - (end - start) >= MAX_LEN) {
+                    event.preventDefault();
+                    showLimitAlert();
+                }
             }
         });
-        input.addEventListener("beforeinput", function (event) {
-            if (!event || event.isComposing) {
-                return;
-            }
-            if (event.inputType && event.inputType.indexOf("insert") !== 0) {
-                return;
-            }
-            var text = event.data != null ? String(event.data) : "";
-            if (!text) {
-                return;
-            }
-            blockExtraInput(event, text.length);
+        input.addEventListener("input", function () {
+            applyNameValue(input.value);
         });
         input.addEventListener("paste", function (event) {
-            blockExtraInput(event, clipboardText(event).length || 1);
+            var clipData = event.clipboardData || (typeof window !== "undefined" && window.clipboardData);
+            var text = clipData ? clipData.getData("text") || clipData.getData("Text") || "" : "";
+            var start = input.selectionStart || 0;
+            var end = input.selectionEnd || 0;
+            var next = input.value.slice(0, start) + text + input.value.slice(end);
+            if (next.length > MAX_LEN) {
+                event.preventDefault();
+                applyNameValue(next);
+            }
         });
     }
 
     function render() {
         UI.setHtml(
-            '<div class="ty-name" data-action="keydown">' +
+            '<div class="ty-name">' +
                 '<div class="ty-name-header">' +
                 '<label for="testYannName">Name</label>' +
                 '<div id="testYannNameHint" class="ty-count">' +
                 counterHtml() +
                 "</div>" +
                 "</div>" +
-                '<input id="testYannName" type="text" maxlength="' +
-                MAX_LEN +
-                '" autocomplete="off" spellcheck="false" data-action="input" value="' +
+                '<input id="testYannName" type="text" autocomplete="off" spellcheck="false" data-action="input" value="' +
                 escapeHtml(currentName) +
                 '" />' +
-                "<p class=\"ty-help\">Maximum 10 characters. Extra characters are blocked and an alert is shown.</p>" +
+                "<p class=\"ty-help\">Maximum 10 characters. An alert is shown if you try to enter more.</p>" +
                 "</div>" +
                 "<style>" +
                 ".ty-name{font-family:Roboto,Helvetica,Arial,sans-serif;color:#1d232a;padding:12px 16px 8px;box-sizing:border-box;}" +
@@ -228,26 +198,6 @@
             id = data.event.target.id;
         }
         return id === "testYannName";
-    }
-
-    function uiActionType(data) {
-        if (data && data.event && data.event.type) {
-            return data.event.type;
-        }
-        return (data && (data.type || data.action)) || "";
-    }
-
-    function applyNameValue(next) {
-        var clipped = clip(next);
-        if (String(next) !== clipped) {
-            showLimitAlert();
-        }
-        currentName = clipped;
-        UI.setChildHtml("testYannNameHint", counterHtml());
-        var input = nameInputFrom();
-        if (input && input.value !== currentName) {
-            input.value = currentName;
-        }
     }
 
     function nameAttribute() {
@@ -316,19 +266,7 @@
             }
             return;
         }
-        if (type !== "uiAction") {
-            return;
-        }
-        var kind = uiActionType(data);
-        if (kind === "keydown") {
-            blockExtraInput(eventFrom(data), isPrintableKey(eventFrom(data)) ? 1 : 0);
-            return;
-        }
-        if (kind === "paste") {
-            blockExtraInput(eventFrom(data), clipboardText(eventFrom(data)).length || 1);
-            return;
-        }
-        if (isNameInput(data) && (kind === "input" || kind === "change" || !kind)) {
+        if (type === "uiAction" && isNameInput(data)) {
             applyNameValue(valueFromUiAction(data));
         }
     });
