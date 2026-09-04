@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Name</title>
+    <style>
+        body { margin: 0; background: #fff; }
+        .ty-name {
+            font-family: Roboto, Helvetica, Arial, sans-serif;
+            color: #1d232a;
+            padding: 12px 16px 8px;
+            box-sizing: border-box;
+        }
+        .ty-name-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        label { font-size: 13px; font-weight: 600; letter-spacing: 0.01em; }
+        #count { font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; color: #6a6d70; }
+        #name {
+            display: block;
+            width: 100%;
+            max-width: 22ch;
+            box-sizing: border-box;
+            height: 36px;
+            padding: 8px 10px;
+            border: 1px solid #89919a;
+            border-radius: 4px;
+            font-size: 14px;
+            line-height: 20px;
+            background: #fff;
+        }
+        #name:focus {
+            border-color: #673AB7;
+            outline: 2px solid rgba(103, 58, 183, 0.28);
+            outline-offset: 1px;
+        }
+        .ty-help { margin: 8px 0 0; font-size: 12px; line-height: 16px; color: #6a6d70; }
+    </style>
+</head>
+<body>
+    <div class="ty-name">
+        <div class="ty-name-header">
+            <label for="name">Name</label>
+            <span id="count">0 / 10</span>
+        </div>
+        <input id="name" type="text" maxlength="10" autocomplete="off" spellcheck="false" />
+        <p class="ty-help">Maximum 10 characters. Extra characters are blocked and an alert is shown.</p>
+    </div>
+    <script>
+        (function () {
+            var MAX = 10;
+            var MSG = "Name is limited to 10 characters. The extra character was not added.";
+            var input = document.getElementById("name");
+            var count = document.getElementById("count");
+            var alerting = false;
+
+            function params() {
+                var out = {};
+                var query = (location.search || "").replace(/^\?/, "");
+                var hash = (location.hash || "").replace(/^#/, "");
+                (query + "&" + hash).split("&").forEach(function (part) {
+                    if (!part) return;
+                    var pair = part.split("=");
+                    out[decodeURIComponent(pair[0])] = decodeURIComponent((pair[1] || "").replace(/\+/g, " "));
+                });
+                return out;
+            }
+
+            function clip(value) {
+                return String(value == null ? "" : value).slice(0, MAX);
+            }
+
+            function refreshCount() {
+                var n = input.value.length;
+                count.textContent = n + " / " + MAX;
+                count.style.color = n >= MAX ? "#b42318" : "#6a6d70";
+            }
+
+            function warn() {
+                if (alerting) return;
+                alerting = true;
+                alert(MSG);
+                setTimeout(function () {
+                    alerting = false;
+                }, 300);
+            }
+
+            input.value = clip(params().v || params().n || "");
+            refreshCount();
+
+            input.addEventListener("keydown", function (event) {
+                if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+                if (!event.key || event.key.length !== 1) return;
+                var start = input.selectionStart || 0;
+                var end = input.selectionEnd || 0;
+                if (input.value.length - (end - start) >= MAX) {
+                    event.preventDefault();
+                    warn();
+                }
+            });
+
+            input.addEventListener("input", function () {
+                if (input.value.length > MAX) {
+                    input.value = clip(input.value);
+                    warn();
+                }
+                refreshCount();
+            });
+
+            input.addEventListener("paste", function (event) {
+                var text = (event.clipboardData && event.clipboardData.getData("text")) || "";
+                var start = input.selectionStart || 0;
+                var end = input.selectionEnd || 0;
+                var next = input.value.slice(0, start) + text + input.value.slice(end);
+                if (next.length > MAX) {
+                    event.preventDefault();
+                    input.value = clip(next);
+                    refreshCount();
+                    warn();
+                }
+            });
+        })();
+    </script>
+</body>
+</html>
