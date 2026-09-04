@@ -1,13 +1,16 @@
 /**
  * test_Yann profile only: Name editor with a live 10-character cap and Hub-like styling.
- * Runs in the Custom facet iframe (maxlength + CSS work here). Does not touch other types.
+ * At 10 characters, further input is blocked and Hub shows an alert. Does not touch other types.
  */
 (function () {
     var MAX_LEN = 10;
     var ENTITY_TYPE = "configuration/entityTypes/test_Yann";
     var NAME_TYPE = ENTITY_TYPE + "/attributes/Name";
+    var LIMIT_MESSAGE =
+        "Name is limited to 10 characters. The extra character was not added.";
     var currentName = "";
     var nameMeta = null;
+    var limitAlertOpen = false;
 
     function isTestYann(entity) {
         return !!(entity && entity.type === ENTITY_TYPE);
@@ -60,9 +63,122 @@
         );
     }
 
+    function showLimitAlert() {
+        if (limitAlertOpen) {
+            return;
+        }
+        limitAlertOpen = true;
+        var done = function () {
+            limitAlertOpen = false;
+        };
+        try {
+            var pending = UI.alert(LIMIT_MESSAGE);
+            if (pending && typeof pending.then === "function") {
+                pending.then(done, done);
+                return;
+            }
+        } catch (e) {
+            /* fall through */
+        }
+        done();
+    }
+
+    function eventFrom(data) {
+        return (data && data.event) || data || {};
+    }
+
+    function nameInputFrom(data) {
+        var event = eventFrom(data);
+        if (event.target && event.target.id === "testYannName") {
+            return event.target;
+        }
+        if (typeof document !== "undefined") {
+            return document.getElementById("testYannName");
+        }
+        return null;
+    }
+
+    function allowedInsertLength(input) {
+        var value = input && input.value != null ? String(input.value) : currentName;
+        var start = input && typeof input.selectionStart === "number" ? input.selectionStart : value.length;
+        var end = input && typeof input.selectionEnd === "number" ? input.selectionEnd : value.length;
+        return Math.max(0, MAX_LEN - (value.length - (end - start)));
+    }
+
+    function isPrintableKey(event) {
+        if (!event) {
+            return false;
+        }
+        if (event.ctrlKey || event.metaKey || event.altKey) {
+            return false;
+        }
+        if (event.isComposing || event.keyCode === 229) {
+            return false;
+        }
+        if (typeof event.key === "string") {
+            return event.key.length === 1;
+        }
+        var code = event.which || event.keyCode;
+        return code >= 32 && code <= 126;
+    }
+
+    function clipboardText(event) {
+        var clip = event && (event.clipboardData || (typeof window !== "undefined" && window.clipboardData));
+        if (!clip) {
+            return "";
+        }
+        return clip.getData("text") || clip.getData("Text") || "";
+    }
+
+    function blockExtraInput(event, insertLen) {
+        var input = event && event.target && event.target.id === "testYannName" ? event.target : nameInputFrom({ event: event });
+        if (allowedInsertLength(input) >= insertLen) {
+            return false;
+        }
+        if (event && typeof event.preventDefault === "function") {
+            event.preventDefault();
+        }
+        showLimitAlert();
+        return true;
+    }
+
+    function bindNameInput() {
+        var input;
+        try {
+            input = typeof document !== "undefined" ? document.getElementById("testYannName") : null;
+        } catch (e) {
+            return;
+        }
+        if (!input || input.getAttribute("data-ty-bound") === "1") {
+            return;
+        }
+        input.setAttribute("data-ty-bound", "1");
+        input.addEventListener("keydown", function (event) {
+            if (isPrintableKey(event)) {
+                blockExtraInput(event, 1);
+            }
+        });
+        input.addEventListener("beforeinput", function (event) {
+            if (!event || event.isComposing) {
+                return;
+            }
+            if (event.inputType && event.inputType.indexOf("insert") !== 0) {
+                return;
+            }
+            var text = event.data != null ? String(event.data) : "";
+            if (!text) {
+                return;
+            }
+            blockExtraInput(event, text.length);
+        });
+        input.addEventListener("paste", function (event) {
+            blockExtraInput(event, clipboardText(event).length || 1);
+        });
+    }
+
     function render() {
         UI.setHtml(
-            '<div class="ty-name">' +
+            '<div class="ty-name" data-action="keydown">' +
                 '<div class="ty-name-header">' +
                 '<label for="testYannName">Name</label>' +
                 '<div id="testYannNameHint" class="ty-count">' +
@@ -74,7 +190,7 @@
                 '" autocomplete="off" spellcheck="false" data-action="input" value="' +
                 escapeHtml(currentName) +
                 '" />' +
-                '<p class="ty-help">Maximum 10 characters. Extra characters are blocked as you type.</p>' +
+                "<p class=\"ty-help\">Maximum 10 characters. Extra characters are blocked and an alert is shown.</p>" +
                 "</div>" +
                 "<style>" +
                 ".ty-name{font-family:Roboto,Helvetica,Arial,sans-serif;color:#1d232a;padding:12px 16px 8px;box-sizing:border-box;}" +
@@ -87,6 +203,7 @@
                 ".ty-help{margin:8px 0 0;font-size:12px;line-height:16px;color:#6a6d70;}" +
                 "</style>"
         );
+        bindNameInput();
     }
 
     function valueFromUiAction(data) {
@@ -111,6 +228,26 @@
             id = data.event.target.id;
         }
         return id === "testYannName";
+    }
+
+    function uiActionType(data) {
+        if (data && data.event && data.event.type) {
+            return data.event.type;
+        }
+        return (data && (data.type || data.action)) || "";
+    }
+
+    function applyNameValue(next) {
+        var clipped = clip(next);
+        if (String(next) !== clipped) {
+            showLimitAlert();
+        }
+        currentName = clipped;
+        UI.setChildHtml("testYannNameHint", counterHtml());
+        var input = nameInputFrom();
+        if (input && input.value !== currentName) {
+            input.value = currentName;
+        }
     }
 
     function nameAttribute() {
@@ -179,9 +316,20 @@
             }
             return;
         }
-        if (type === "uiAction" && isNameInput(data)) {
-            currentName = clip(valueFromUiAction(data));
-            UI.setChildHtml("testYannNameHint", counterHtml());
+        if (type !== "uiAction") {
+            return;
+        }
+        var kind = uiActionType(data);
+        if (kind === "keydown") {
+            blockExtraInput(eventFrom(data), isPrintableKey(eventFrom(data)) ? 1 : 0);
+            return;
+        }
+        if (kind === "paste") {
+            blockExtraInput(eventFrom(data), clipboardText(eventFrom(data)).length || 1);
+            return;
+        }
+        if (isNameInput(data) && (kind === "input" || kind === "change" || !kind)) {
+            applyNameValue(valueFromUiAction(data));
         }
     });
 
