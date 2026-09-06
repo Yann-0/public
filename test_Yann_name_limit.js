@@ -1,96 +1,11 @@
 /**
- * test_Yann profile only: loads the Name editor as a real HTML document in an iframe.
- * Hub sanitizes setHtml (strips maxlength / on* handlers), so the input must not live there.
+ * test_Yann only: intercept entity writes. If Name is longer than 10,
+ * show a Hub alert and do not send the request.
  */
 (function () {
     var MAX_LEN = 10;
     var ENTITY_TYPE = "configuration/entityTypes/test_Yann";
-    var NAME_TYPE = ENTITY_TYPE + "/attributes/Name";
-    var EDITOR_URL =
-        "https://cdn.statically.io/gh/Yann-0/public@main/test_Yann_name_limit.html";
-    var currentName = "";
-    var nameMeta = null;
-
-    function isTestYann(entity) {
-        return !!(entity && entity.type === ENTITY_TYPE);
-    }
-
-    function clip(value) {
-        return String(value == null ? "" : value).slice(0, MAX_LEN);
-    }
-
-    function nameFromEntity(entity) {
-        if (!isTestYann(entity) || !entity.attributes || !entity.attributes.Name) {
-            nameMeta = { type: NAME_TYPE };
-            return "";
-        }
-        var values = entity.attributes.Name;
-        var ov = null;
-        for (var i = 0; i < values.length; i++) {
-            if (values[i].ov !== false) {
-                ov = values[i];
-                break;
-            }
-        }
-        var chosen = ov || values[0] || {};
-        nameMeta = {
-            type: chosen.type || NAME_TYPE,
-            uri: chosen.uri
-        };
-        return clip(chosen.value);
-    }
-
-    function render() {
-        var src = EDITOR_URL + "?v=" + encodeURIComponent(currentName);
-        UI.setHtml(
-            '<iframe title="Name" src="' +
-                src +
-                '" style="width:100%;height:168px;border:0;display:block;background:#fff;"></iframe>'
-        );
-    }
-
-    function nameAttribute() {
-        var next = {
-            type: (nameMeta && nameMeta.type) || NAME_TYPE,
-            value: clip(currentName)
-        };
-        if (nameMeta && nameMeta.uri) {
-            next.uri = nameMeta.uri;
-        }
-        return next;
-    }
-
-    function injectEntity(entity) {
-        if (!isTestYann(entity)) {
-            return;
-        }
-        entity.attributes = entity.attributes || {};
-        var existing = entity.attributes.Name && entity.attributes.Name[0];
-        if (existing && existing.value != null) {
-            existing.value = clip(existing.value);
-            return;
-        }
-        entity.attributes.Name = [nameAttribute()];
-    }
-
-    function injectName(payload) {
-        if (payload == null) {
-            return payload;
-        }
-        if (Array.isArray(payload)) {
-            if (payload.length && payload[0] && payload[0].type === ENTITY_TYPE) {
-                for (var i = 0; i < payload.length; i++) {
-                    injectEntity(payload[i]);
-                }
-                return payload;
-            }
-            return payload;
-        }
-        if (typeof payload === "object") {
-            injectEntity(payload);
-        }
-        return payload;
-    }
+    var LIMIT_MESSAGE = "Name is limited to 10 characters.";
 
     function parseData(data) {
         if (typeof data !== "string") {
@@ -103,38 +18,163 @@
         }
     }
 
-    UI.setHeight(168);
-    render();
+    function urlOf(urlOrParams) {
+        if (urlOrParams && typeof urlOrParams === "object") {
+            return String(urlOrParams.url || "");
+        }
+        return String(urlOrParams || "");
+    }
 
-    UI.getEntity().then(function (entity) {
-        currentName = nameFromEntity(entity);
-        render();
-    });
+    function methodOf(urlOrParams, method) {
+        if (urlOrParams && typeof urlOrParams === "object" && urlOrParams.method) {
+            return String(urlOrParams.method).toUpperCase();
+        }
+        return String(method || "GET").toUpperCase();
+    }
 
-    UI.onEvent(function (type, data) {
-        if (type === "updateEntity") {
-            var next = nameFromEntity(data);
-            if (next !== currentName) {
-                currentName = next;
-                render();
+    function isWrite(method) {
+        return method === "POST" || method === "PUT" || method === "PATCH";
+    }
+
+    function isTestYann(entity) {
+        return !!(entity && entity.type === ENTITY_TYPE);
+    }
+
+    function isNameAttributeUrl(url) {
+        return /\/attributes\/Name(?:\/|\?|$)/.test(url) && /\/entities\//.test(url);
+    }
+
+    function nameValuesTooLong(values) {
+        if (!values || !values.length) {
+            return false;
+        }
+        for (var i = 0; i < values.length; i++) {
+            if (values[i] && values[i].value != null && String(values[i].value).length > MAX_LEN) {
+                return true;
             }
         }
-    });
+        return false;
+    }
 
-    UI.onApiRequest(function (urlOrParams, method, headers, data) {
-        var url = urlOrParams;
+    function entityNameTooLong(entity, assumeTestYann) {
+        if (!assumeTestYann && !isTestYann(entity)) {
+            return false;
+        }
+        return !!(entity && entity.attributes && nameValuesTooLong(entity.attributes.Name));
+    }
+
+    function payloadNameTooLong(payload, assumeTestYann) {
+        if (payload == null) {
+            return false;
+        }
+        if (Array.isArray(payload)) {
+            for (var i = 0; i < payload.length; i++) {
+                if (entityNameTooLong(payload[i], assumeTestYann)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (typeof payload !== "object") {
+            return false;
+        }
+        if (payload.attributes || payload.type) {
+            return entityNameTooLong(payload, assumeTestYann);
+        }
+        return payload.value != null && String(payload.value).length > MAX_LEN;
+    }
+
+    function blockedResult() {
+        return [
+            {
+                successful: false,
+                errors: {
+                    severity: "Error",
+                    errorMessage: LIMIT_MESSAGE,
+                    errorCode: 31010
+                }
+            }
+        ];
+    }
+
+    function blockAfterAlert() {
+        return Promise.resolve()
+            .then(function () {
+                try {
+                    var pending = UI.alert(LIMIT_MESSAGE);
+                    if (pending && typeof pending.then === "function") {
+                        return pending;
+                    }
+                } catch (e) {
+                    /* ignore */
+                }
+                return undefined;
+            })
+            .then(
+                function () {
+                    return Promise.reject(blockedResult());
+                },
+                function () {
+                    return Promise.reject(blockedResult());
+                }
+            );
+    }
+
+    function applyWrite(url, method, tenant, headers, data) {
+        var parsed = parseData(data);
+        if (payloadNameTooLong(parsed, false)) {
+            return blockAfterAlert();
+        }
+        var maybeNameWrite =
+            isNameAttributeUrl(url) || (parsed && parsed.attributes && parsed.attributes.Name);
+        if (!maybeNameWrite) {
+            return UI.api(url, method, tenant, headers, data);
+        }
+        if (isTestYann(parsed) || (Array.isArray(parsed) && parsed.some(isTestYann))) {
+            if (payloadNameTooLong(parsed, true)) {
+                return blockAfterAlert();
+            }
+            return UI.api(url, method, tenant, headers, data);
+        }
+        return UI.getEntity().then(function (entity) {
+            if (!isTestYann(entity)) {
+                return UI.api(url, method, tenant, headers, data);
+            }
+            if (payloadNameTooLong(parsed, true)) {
+                return blockAfterAlert();
+            }
+            return UI.api(url, method, tenant, headers, data);
+        });
+    }
+
+    UI.onApiRequest(function (urlOrParams, method, headers, data, callback) {
+        var url = urlOf(urlOrParams);
         var tenant;
         if (urlOrParams && typeof urlOrParams === "object") {
-            url = urlOrParams.url;
-            method = urlOrParams.method;
-            headers = urlOrParams.headers;
+            headers = urlOrParams.headers || headers;
             data = urlOrParams.data;
             tenant = urlOrParams.tenant;
         }
-        var verb = String(method || "GET").toUpperCase();
-        if (verb === "POST" || verb === "PUT" || verb === "PATCH") {
-            data = injectName(parseData(data));
+        var verb = methodOf(urlOrParams, method);
+        var send = function (result) {
+            if (typeof callback === "function") {
+                if (result && typeof result.then === "function") {
+                    return result.then(
+                        function (json) {
+                            callback(json);
+                        },
+                        function (err) {
+                            callback(err || blockedResult(), 400, {});
+                        }
+                    );
+                }
+                return callback(result);
+            }
+            return result;
+        };
+        if (!isWrite(verb)) {
+            return send(UI.api(url, verb, tenant, headers, data));
         }
-        return UI.api(url, verb, tenant, headers, data);
+        return send(applyWrite(url, verb, tenant, headers, data));
     });
 })();
