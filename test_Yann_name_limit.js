@@ -1,16 +1,18 @@
 /**
- * test_Yann only: block Name longer than 10 characters and show the message
- * in the Custom facet under Name. Do not return DVF/validationErrors — Hub nui
- * paints those in the profile "1 error" banner.
+ * test_Yann only: Name max 10 characters.
+ * Hub nui paints DVF / validationErrors in the profile banner, so this script
+ * 1) renders Name + the error under the input in the Custom facet
+ * 2) blocks the write without returning a DVF envelope
  */
 (function () {
     var MAX_LEN = 10;
     var ENTITY_TYPE = "configuration/entityTypes/test_Yann";
+    var NAME_TYPE = ENTITY_TYPE + "/attributes/Name";
     var LIMIT_MESSAGE = "Name must be 10 characters or fewer.";
-    var ERROR_HTML =
-        '<div style="font-family:Roboto,Helvetica,Arial,sans-serif;color:#d32f2f;font-size:12px;line-height:16px;padding:4px 16px 12px;">' +
-        LIMIT_MESSAGE +
-        "</div>";
+    var currentName = "";
+    var nameMeta = null;
+    var entityUri = null;
+    var canRender = false;
 
     function parseData(data) {
         if (typeof data !== "string") {
@@ -41,6 +43,66 @@
         return method === "POST" || method === "PUT" || method === "PATCH";
     }
 
+    function nameValueTooLong(value) {
+        return value != null && String(value).length > MAX_LEN;
+    }
+
+    function nameFieldTooLong(name) {
+        if (name == null) {
+            return false;
+        }
+        if (typeof name === "string") {
+            return nameValueTooLong(name);
+        }
+        if (Array.isArray(name)) {
+            for (var i = 0; i < name.length; i++) {
+                if (nameFieldTooLong(name[i])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (typeof name === "object") {
+            if (name.value != null) {
+                return nameValueTooLong(name.value);
+            }
+        }
+        return false;
+    }
+
+    function payloadNameTooLong(payload) {
+        if (payload == null) {
+            return false;
+        }
+        if (typeof payload === "string") {
+            return nameValueTooLong(payload);
+        }
+        if (Array.isArray(payload)) {
+            for (var i = 0; i < payload.length; i++) {
+                if (payloadNameTooLong(payload[i])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (typeof payload !== "object") {
+            return false;
+        }
+        if (payload.object) {
+            return payloadNameTooLong(payload.object);
+        }
+        if (payload.attributes) {
+            return nameFieldTooLong(payload.attributes.Name);
+        }
+        if (payload.Name) {
+            return nameFieldTooLong(payload.Name);
+        }
+        if (payload.type && payload.type !== ENTITY_TYPE && payload.type !== NAME_TYPE) {
+            return false;
+        }
+        return payload.value != null && nameValueTooLong(payload.value);
+    }
+
     function isTestYann(entity) {
         return !!(entity && entity.type === ENTITY_TYPE);
     }
@@ -66,66 +128,59 @@
         return payload;
     }
 
-    function nameValuesTooLong(values) {
-        if (!values || !values.length) {
-            return false;
+    function applyEntity(entity) {
+        if (!isTestYann(entity)) {
+            return;
         }
-        for (var i = 0; i < values.length; i++) {
-            if (values[i] && values[i].value != null && String(values[i].value).length > MAX_LEN) {
-                return true;
-            }
+        entityUri = entity.uri || entityUri;
+        var values = entity.attributes && entity.attributes.Name;
+        if (Array.isArray(values) && values[0]) {
+            currentName = String(values[0].value == null ? "" : values[0].value);
+            nameMeta = values[0];
+        } else if (values && values.value != null) {
+            currentName = String(values.value);
+            nameMeta = values;
         }
-        return false;
+        render();
     }
 
-    function entityNameTooLong(entity) {
-        return !!(entity && entity.attributes && nameValuesTooLong(entity.attributes.Name));
-    }
-
-    function payloadNameTooLong(payload) {
-        if (payload == null) {
-            return false;
+    function render() {
+        if (!canRender) {
+            return;
         }
-        if (Array.isArray(payload)) {
-            for (var i = 0; i < payload.length; i++) {
-                if (entityNameTooLong(payload[i])) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        if (typeof payload !== "object") {
-            return false;
-        }
-        if (payload.attributes || payload.type) {
-            return entityNameTooLong(payload);
-        }
-        return payload.value != null && String(payload.value).length > MAX_LEN;
-    }
-
-    function isDvfFailure(json) {
-        var blocks = Array.isArray(json) ? json : [json];
-        for (var i = 0; i < blocks.length; i++) {
-            var errors = blocks[i] && (blocks[i].errors || blocks[i].error);
-            if (errors && String(errors.errorCode) === "31010") {
-                return true;
-            }
-            var text = JSON.stringify(errors || {}).toLowerCase();
-            if (text.indexOf("10 character") !== -1 || text.indexOf("dvf") !== -1) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    function showFieldError(show) {
+        var tooLong = currentName.length > MAX_LEN;
         try {
             UI.setVisibility("visible");
-            UI.setHtml(show ? ERROR_HTML : "");
-            UI.setHeight(show ? 44 : 8);
+            UI.setHtml(
+                tooLong
+                    ? '<div id="ty-err" style="font-family:Roboto,Helvetica,Arial,sans-serif;color:#d32f2f;font-size:12px;line-height:16px;padding:4px 16px 12px;">' +
+                      LIMIT_MESSAGE +
+                      "</div>"
+                    : '<div id="ty-err"></div>'
+            );
+            UI.setHeight(tooLong ? 44 : 8);
         } catch (e) {
-            /* customScripts sandbox has no Custom view */
+            canRender = false;
         }
+    }
+
+    function valueFromUiAction(data) {
+        if (data == null) {
+            return null;
+        }
+        if (typeof data === "string") {
+            return data;
+        }
+        if (data.value != null) {
+            return String(data.value);
+        }
+        if (data.event && data.event.target && data.event.target.value != null) {
+            return String(data.event.target.value);
+        }
+        if (data.target && data.target.value != null) {
+            return String(data.target.value);
+        }
+        return null;
     }
 
     function blockedBody() {
@@ -140,60 +195,77 @@
     }
 
     function block(callback) {
-        showFieldError(true);
+        try {
+            UI.setVisibility("visible");
+            UI.setHtml(
+                '<div id="ty-err" style="font-family:Roboto,Helvetica,Arial,sans-serif;color:#d32f2f;font-size:12px;line-height:16px;padding:4px 16px 12px;">' +
+                    LIMIT_MESSAGE +
+                    "</div>"
+            );
+            UI.setHeight(44);
+        } catch (e) {
+            /* customScripts sandbox */
+        }
         return send(callback, blockedBody(), 200, {});
     }
 
-    function stripBanner(json) {
-        var blocks = Array.isArray(json) ? json : [json];
-        var out = blocks.map(function (block) {
-            if (!block || block.successful !== false) {
-                return block;
-            }
-            return { successful: false };
-        });
-        return Array.isArray(json) ? out : out[0];
+    function shouldInspect(url, parsed) {
+        if (isTestYann(firstEntity(parsed)) || payloadNameTooLong(parsed)) {
+            return true;
+        }
+        return /\/entities/.test(url);
     }
 
     function handleWrite(url, method, tenant, headers, data, callback) {
         var parsed = parseData(data);
-        var run = function (tooLong) {
-            if (tooLong) {
-                return block(callback);
-            }
-            return UI.api(url, method, tenant, headers, data, function (json, status, respHeaders) {
-                if (isDvfFailure(json) || (status >= 300 && payloadNameTooLong(parsed))) {
-                    showFieldError(true);
-                    return send(callback, stripBanner(json) || blockedBody(), 200, respHeaders || {});
-                }
-                showFieldError(false);
-                return send(callback, json, status, respHeaders);
-            });
-        };
-        if (isTestYann(firstEntity(parsed))) {
-            return run(payloadNameTooLong(parsed));
+        if (currentName.length > MAX_LEN || payloadNameTooLong(parsed)) {
+            return block(callback);
         }
-        if (payloadNameTooLong(parsed) || /\/attributes\/Name(?:\/|\?|$)/.test(url) || /\/entities/.test(url)) {
-            return UI.getEntity().then(
-                function (entity) {
-                    if (!isTestYann(entity)) {
-                        return UI.api(url, method, tenant, headers, data, callback);
-                    }
-                    return run(payloadNameTooLong(parsed));
-                },
-                function () {
+        if (!shouldInspect(url, parsed)) {
+            return UI.api(url, method, tenant, headers, data, callback);
+        }
+        var entity = firstEntity(parsed);
+        if (isTestYann(entity) || payloadNameTooLong(parsed)) {
+            return payloadNameTooLong(parsed) ? block(callback) : UI.api(url, method, tenant, headers, data, callback);
+        }
+        return UI.getEntity().then(
+            function (loaded) {
+                if (!isTestYann(loaded)) {
                     return UI.api(url, method, tenant, headers, data, callback);
                 }
-            );
-        }
-        return UI.api(url, method, tenant, headers, data, callback);
+                applyEntity(loaded);
+                if (currentName.length > MAX_LEN || payloadNameTooLong(parsed)) {
+                    return block(callback);
+                }
+                return UI.api(url, method, tenant, headers, data, callback);
+            },
+            function () {
+                return UI.api(url, method, tenant, headers, data, callback);
+            }
+        );
     }
 
-    showFieldError(false);
+    try {
+        UI.setVisibility("visible");
+        canRender = true;
+        render();
+    } catch (e) {
+        canRender = false;
+    }
 
-    UI.onEvent(function (type) {
+    UI.getEntity().then(applyEntity, function () {});
+
+    UI.onEvent(function (type, data) {
         if (type === "updateEntity") {
-            showFieldError(false);
+            applyEntity(data);
+            return;
+        }
+        if (type === "uiAction") {
+            var next = valueFromUiAction(data);
+            if (next != null) {
+                currentName = next;
+                render();
+            }
         }
     });
 
