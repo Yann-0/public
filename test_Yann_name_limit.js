@@ -1,7 +1,7 @@
 /**
  * test_Yann only: Name max 10 characters.
  * Hub nui paints DVF / validationErrors in the profile banner, so this script
- * 1) renders Name + the error under the input in the Custom facet
+ * 1) shows the error in the Custom facet under Name
  * 2) blocks the write without returning a DVF envelope
  */
 (function () {
@@ -70,6 +70,36 @@
         return false;
     }
 
+    function deepNameTooLong(node, inName) {
+        if (node == null) {
+            return false;
+        }
+        if (typeof node === "string") {
+            return !!(inName && nameValueTooLong(node));
+        }
+        if (Array.isArray(node)) {
+            for (var i = 0; i < node.length; i++) {
+                if (deepNameTooLong(node[i], inName)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (typeof node !== "object") {
+            return false;
+        }
+        for (var key in node) {
+            if (!Object.prototype.hasOwnProperty.call(node, key)) {
+                continue;
+            }
+            var next = inName || key === "Name" || key === "name";
+            if (deepNameTooLong(node[key], next)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     function payloadNameTooLong(payload) {
         if (payload == null) {
             return false;
@@ -88,14 +118,17 @@
         if (typeof payload !== "object") {
             return false;
         }
-        if (payload.object) {
-            return payloadNameTooLong(payload.object);
+        if (payload.object && payloadNameTooLong(payload.object)) {
+            return true;
         }
-        if (payload.attributes) {
-            return nameFieldTooLong(payload.attributes.Name);
+        if (payload.attributes && nameFieldTooLong(payload.attributes.Name)) {
+            return true;
         }
-        if (payload.Name) {
-            return nameFieldTooLong(payload.Name);
+        if (payload.Name && nameFieldTooLong(payload.Name)) {
+            return true;
+        }
+        if (deepNameTooLong(payload, false)) {
+            return true;
         }
         if (payload.type && payload.type !== ENTITY_TYPE && payload.type !== NAME_TYPE) {
             return false;
@@ -149,16 +182,17 @@
             return;
         }
         var tooLong = currentName.length > MAX_LEN;
+        var color = tooLong ? "#d32f2f" : "#6a6d70";
         try {
             UI.setVisibility("visible");
             UI.setHtml(
-                tooLong
-                    ? '<div id="ty-err" style="font-family:Roboto,Helvetica,Arial,sans-serif;color:#d32f2f;font-size:12px;line-height:16px;padding:4px 16px 12px;">' +
-                      LIMIT_MESSAGE +
-                      "</div>"
-                    : '<div id="ty-err"></div>'
+                '<div id="ty-err" style="font-family:Roboto,Helvetica,Arial,sans-serif;color:' +
+                    color +
+                    ';font-size:12px;line-height:16px;padding:4px 16px 12px;">' +
+                    LIMIT_MESSAGE +
+                    "</div>"
             );
-            UI.setHeight(tooLong ? 44 : 8);
+            UI.setHeight(44);
         } catch (e) {
             canRender = false;
         }
