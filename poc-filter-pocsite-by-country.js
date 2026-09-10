@@ -14,6 +14,114 @@
     var COUNTRY_EQUALS_RE = /equals\(\s*attributes\.CountryCode\s*,\s*(?:'[^']*'|\{[^}]*\})\s*\)/g;
 
     var lastEntity = null;
+    // Label → ISO 3166-1 alpha-2. Used only when Hub gives the selected country
+    // name (Angola) without lookupCode. Not a hardcoded filter.
+    var ISO_BY_NAME = {
+        afghanistan: "AF", albania: "AL", algeria: "DZ", "american samoa": "AS",
+        andorra: "AD", angola: "AO", anguilla: "AI", antarctica: "AQ",
+        "antigua and barbuda": "AG", argentina: "AR", armenia: "AM", aruba: "AW",
+        australia: "AU", austria: "AT", azerbaijan: "AZ", bahamas: "BS",
+        bahrain: "BH", bangladesh: "BD", barbados: "BB", belarus: "BY",
+        belgium: "BE", belize: "BZ", benin: "BJ", bermuda: "BM", bhutan: "BT",
+        bolivia: "BO", "bosnia and herzegovina": "BA", botswana: "BW",
+        "bouvet island": "BV", brazil: "BR", "british indian ocean territory": "IO",
+        "brunei darussalam": "BN", bulgaria: "BG", "burkina faso": "BF", burundi: "BI",
+        "cabo verde": "CV", "cape verde": "CV", cambodia: "KH", cameroon: "CM",
+        canada: "CA", "cayman islands": "KY", "central african republic": "CF",
+        chad: "TD", chile: "CL", china: "CN", "christmas island": "CX",
+        "cocos islands": "CC", colombia: "CO", comoros: "KM", congo: "CG",
+        "congo (the democratic republic of the)": "CD", "democratic republic of the congo": "CD",
+        "cook islands": "CK", "costa rica": "CR", croatia: "HR", cuba: "CU",
+        curacao: "CW", cyprus: "CY", czechia: "CZ", "czech republic": "CZ",
+        "cote d'ivoire": "CI", "côte d'ivoire": "CI", "ivory coast": "CI",
+        denmark: "DK", djibouti: "DJ", dominica: "DM", "dominican republic": "DO",
+        ecuador: "EC", egypt: "EG", "el salvador": "SV", "equatorial guinea": "GQ",
+        eritrea: "ER", estonia: "EE", eswatini: "SZ", swaziland: "SZ", ethiopia: "ET",
+        "falkland islands": "FK", "faroe islands": "FO", fiji: "FJ", finland: "FI",
+        france: "FR", "french guiana": "GF", "french polynesia": "PF",
+        "french southern territories": "TF", gabon: "GA", gambia: "GM", georgia: "GE",
+        germany: "DE", ghana: "GH", gibraltar: "GI", greece: "GR", greenland: "GL",
+        grenada: "GD", guadeloupe: "GP", guam: "GU", guatemala: "GT", guernsey: "GG",
+        guinea: "GN", "guinea-bissau": "GW", guyana: "GY", haiti: "HT",
+        "heard island and mcdonald islands": "HM", "holy see": "VA", honduras: "HN",
+        "hong kong": "HK", hungary: "HU", iceland: "IS", india: "IN", indonesia: "ID",
+        iran: "IR", iraq: "IQ", ireland: "IE", "isle of man": "IM", israel: "IL",
+        italy: "IT", jamaica: "JM", japan: "JP", jersey: "JE", jordan: "JO",
+        kazakhstan: "KZ", kenya: "KE", kiribati: "KI", kuwait: "KW", kyrgyzstan: "KG",
+        laos: "LA", "lao people's democratic republic": "LA", latvia: "LV",
+        lebanon: "LB", lesotho: "LS", liberia: "LR", libya: "LY", liechtenstein: "LI",
+        lithuania: "LT", luxembourg: "LU", macao: "MO", madagascar: "MG", malawi: "MW",
+        malaysia: "MY", maldives: "MV", mali: "ML", malta: "MT", "marshall islands": "MH",
+        martinique: "MQ", mauritania: "MR", mauritius: "MU", mayotte: "YT", mexico: "MX",
+        micronesia: "FM", moldova: "MD", monaco: "MC", mongolia: "MN", montenegro: "ME",
+        montserrat: "MS", morocco: "MA", mozambique: "MZ", myanmar: "MM", namibia: "NA",
+        nauru: "NR", nepal: "NP", netherlands: "NL", "new caledonia": "NC",
+        "new zealand": "NZ", nicaragua: "NI", niger: "NE", nigeria: "NG", niue: "NU",
+        "norfolk island": "NF", "north korea": "KP", "north macedonia": "MK",
+        "macedonia": "MK", "northern mariana islands": "MP", norway: "NO", oman: "OM",
+        pakistan: "PK", palau: "PW", palestine: "PS", panama: "PA",
+        "papua new guinea": "PG", paraguay: "PY", peru: "PE", philippines: "PH",
+        pitcairn: "PN", poland: "PL", portugal: "PT", "puerto rico": "PR", qatar: "QA",
+        reunion: "RE", "réunion": "RE", romania: "RO", "russian federation": "RU",
+        russia: "RU", rwanda: "RW", "saint barthelemy": "BL", "saint helena": "SH",
+        "saint kitts and nevis": "KN", "saint lucia": "LC", "saint martin": "MF",
+        "saint pierre and miquelon": "PM", "saint vincent and the grenadines": "VC",
+        samoa: "WS", "san marino": "SM", "sao tome and principe": "ST",
+        "saudi arabia": "SA", senegal: "SN", serbia: "RS", seychelles: "SC",
+        "sierra leone": "SL", singapore: "SG", "sint maarten": "SX", slovakia: "SK",
+        slovenia: "SI", "solomon islands": "SB", somalia: "SO", "south africa": "ZA",
+        "south georgia": "GS", "south korea": "KR", "korea, republic of": "KR",
+        "korea, republic of the": "KR", "republic of korea": "KR", "south sudan": "SS",
+        spain: "ES", "sri lanka": "LK", sudan: "SD", suriname: "SR",
+        "svalbard and jan mayen": "SJ", sweden: "SE", switzerland: "CH",
+        "syrian arab republic": "SY", syria: "SY", taiwan: "TW", tajikistan: "TJ",
+        tanzania: "TZ", thailand: "TH", "timor-leste": "TL", togo: "TG", tokelau: "TK",
+        tonga: "TO", "trinidad and tobago": "TT", tunisia: "TN", turkey: "TR",
+        turkiye: "TR", türkiye: "TR", turkmenistan: "TM", "turks and caicos islands": "TC",
+        tuvalu: "TV", uganda: "UG", ukraine: "UA", "united arab emirates": "AE",
+        "united kingdom": "GB", "great britain": "GB", "united states": "US",
+        "united states of america": "US", uruguay: "UY", uzbekistan: "UZ", vanuatu: "VU",
+        venezuela: "VE", vietnam: "VN", "viet nam": "VN",
+        "virgin islands, british": "VG", "virgin islands, u.s.": "VI",
+        "wallis and futuna": "WF", "western sahara": "EH", yemen: "YE", zambia: "ZM",
+        zimbabwe: "ZW"
+    };
+
+    function isoFromLabel(label) {
+        if (!label) {
+            return "";
+        }
+        var key = String(label).toLowerCase().replace(/^\s+|\s+$/g, "");
+        return ISO_BY_NAME[key] || "";
+    }
+
+    function quoteLookup(value) {
+        return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    }
+
+    function countryClause(code, label) {
+        var parts = [];
+        function add(v) {
+            if (!v) {
+                return;
+            }
+            var c = "equals(attributes.CountryCode, '" + quoteLookup(v) + "')";
+            if (parts.indexOf(c) === -1) {
+                parts.push(c);
+            }
+        }
+        add(code);
+        if (label && label !== code) {
+            add(label);
+        }
+        if (!parts.length) {
+            return "";
+        }
+        if (parts.length === 1) {
+            return parts[0];
+        }
+        return "(" + parts.join(" or ") + ")";
+    }
 
     function parseData(data) {
         if (typeof data !== "string") {
@@ -101,7 +209,18 @@
         if (!Array.isArray(arr) || !arr.length) {
             return "";
         }
-        return lookupCodeFrom(arr[0]);
+        return lookupCodeFrom(arr[0]) || isoFromLabel(firstLabel(arr));
+    }
+
+    function firstLabel(arr) {
+        if (!Array.isArray(arr) || !arr.length) {
+            return "";
+        }
+        var o = arr[0];
+        if (typeof o === "string") {
+            return o;
+        }
+        return lookupLabelFrom(o) || (typeof o.value === "string" ? o.value : "");
     }
 
     function countryFromNested(nested) {
@@ -121,7 +240,7 @@
                 return siteCode;
             }
         }
-        return lookupCodeFrom(nested) || lookupCodeFrom(val);
+        return lookupCodeFrom(nested) || lookupCodeFrom(val) || isoFromLabel(lookupLabelFrom(val) || lookupLabelFrom(nested));
     }
 
     function countriesFromEntity(entity) {
@@ -170,13 +289,13 @@
         }
         var label = lookupLabelFrom(node);
         if (label) {
-            return codeFromLabel(label, entity || lastEntity);
+            return codeFromLabel(label, entity || lastEntity) || isoFromLabel(label);
         }
         if (typeof node === "string") {
             if (/^[A-Z]{2,3}$/.test(node)) {
                 return node;
             }
-            return codeFromLabel(node, entity || lastEntity);
+            return codeFromLabel(node, entity || lastEntity) || isoFromLabel(node);
         }
         return "";
     }
@@ -251,7 +370,10 @@
         if (!quoted || !quoted[1] || quoted[1].indexOf("{") !== -1) {
             return "";
         }
-        return extractCode(quoted[1], lastEntity);
+        if (quoted[1] === "__COUNTRY_REQUIRED__") {
+            return "";
+        }
+        return extractCode(quoted[1], lastEntity) || quoted[1];
     }
 
     function pickCountry(url, parsed, rawParams, entity) {
@@ -261,7 +383,13 @@
         }
         var fromHubFilter = selectedCountryFromFilter((parsed && parsed.filter) || url);
         if (fromHubFilter) {
-            return fromHubFilter;
+            if (/^[A-Z]{2,3}$/.test(fromHubFilter)) {
+                return fromHubFilter;
+            }
+            var transcoded = isoFromLabel(fromHubFilter);
+            if (transcoded) {
+                return transcoded;
+            }
         }
         var fromEntity = countriesFromEntity(entity || lastEntity);
         if (fromEntity.length === 1) {
@@ -270,16 +398,39 @@
         return "";
     }
 
+    function pickSelected(url, parsed, rawParams, entity) {
+        var e = entity || lastEntity;
+        var code = pickCountry(url, parsed, rawParams, e);
+        var label = "";
+        var rows = e && e.attributes && e.attributes.ParticipatingCountry;
+        if (Array.isArray(rows) && rows.length === 1) {
+            label = firstLabel((rows[0].value || rows[0]).ParticipatingCountryCode);
+            if (!code) {
+                code = firstLookup((rows[0].value || rows[0]).ParticipatingCountryCode);
+            }
+        }
+        if (!label) {
+            var fromFilter = selectedCountryFromFilter((parsed && parsed.filter) || url);
+            if (fromFilter && !/^[A-Z]{2,3}$/.test(fromFilter)) {
+                label = fromFilter;
+            }
+        }
+        if (!code && label) {
+            code = isoFromLabel(label);
+        }
+        return { code: code, label: label };
+    }
+
     function injectFilter(filter, selectedCode) {
-        if (!selectedCode) {
+        var selected = pickSelected("", { filter: filter }, null, lastEntity);
+        var clause = countryClause(selectedCode || selected.code, selected.label);
+        if (!clause && selectedCode) {
+            clause = countryClause(selectedCode, "");
+        }
+        if (!clause) {
             return filter;
         }
-        var clause = "equals(attributes.CountryCode, '" + selectedCode + "')";
         var f = String(filter || "");
-        var existing = selectedCountryFromFilter(f);
-        if (existing === selectedCode) {
-            return f;
-        }
         var replaced = f.replace(COUNTRY_EQUALS_RE, clause);
         if (replaced !== f) {
             return replaced;
@@ -294,6 +445,11 @@
         if (!code) {
             return url;
         }
+        var selected = pickSelected("", { filter: "" }, null, lastEntity);
+        var clause = countryClause(code, selected.label);
+        if (!clause) {
+            clause = countryClause(code, "");
+        }
         if (/([?&])filter=/.test(url)) {
             return url.replace(/([?&]filter=)([^&]*)/, function (all, p1, p2) {
                 var decoded = decodeURIComponent(p2);
@@ -301,7 +457,7 @@
             });
         }
         var sep = url.indexOf("?") >= 0 ? "&" : "?";
-        return url + sep + "filter=" + encodeURIComponent("(equals(type,'" + SITE_TYPE + "') and equals(attributes.CountryCode, '" + code + "'))");
+        return url + sep + "filter=" + encodeURIComponent("(equals(type,'" + SITE_TYPE + "') and " + clause + ")");
     }
 
     function rewriteBody(parsed, code) {
@@ -447,13 +603,17 @@
     }
 
     function applyTypeahead(url, verb, tenant, headers, data, parsed, urlOrParams, entity, callback) {
-        var code = pickCountry(url, parsed, urlOrParams, entity);
-        var filterCode = code || "__COUNTRY_REQUIRED__";
-        var nextUrl = rewriteUrl(url, filterCode);
+        var selected = pickSelected(url, parsed, urlOrParams, entity);
+        var clause = countryClause(selected.code, selected.label);
+        var nextUrl = url;
         var nextData = data;
-        if (verb === "POST" || verb === "PUT" || verb === "PATCH") {
-            var rewritten = rewriteBody(parsed || {}, filterCode);
+        if (clause) {
+            var rewritten = rewriteBody(parsed || {}, selected.code || selected.label);
+            if (rewritten && typeof rewritten === "object" && !Array.isArray(rewritten)) {
+                rewritten.filter = injectFilter(parsed && parsed.filter, selected.code || selected.label);
+            }
             nextData = typeof data === "string" ? JSON.stringify(rewritten) : rewritten;
+            nextUrl = rewriteUrl(url, selected.code || selected.label);
         }
         return UI.api(nextUrl, verb, tenant, headers, nextData, callback);
     }
