@@ -1,14 +1,10 @@
 /**
  * POC Hub: [POC] Site typeahead and Study save.
  *
- * A site belongs to one country. Under a participating country row, the picker
- * must only list sites of THAT country (Algeria must not offer an Angola site).
- *
- * Hub does not reliably substitute nested RDM placeholders, and a lookup filter
- * must use the lookup code (DZ), not the label (Algeria). This script:
- * 1) runs in the profile worker (all /entities* requests)
- * 2) injects equals(attributes.CountryCode, '<ISO code>') on POCSite typeahead
- * 3) rejects Study saves that link a site of another country
+ * Filter is never a hardcoded country. It always uses the Participating Country
+ * selected on the current nested row (lookup code of that RDM value).
+ * Config: equals(attributes.CountryCode, '{ParticipatingCountryCode.lookupCode}').
+ * If Hub leaves the placeholder, this script substitutes the selected row's code.
  */
 (function () {
     var SITE_TYPE = "configuration/entityTypes/POCSite";
@@ -18,7 +14,6 @@
     var COUNTRY_EQUALS_RE = /equals\(\s*attributes\.CountryCode\s*,\s*(?:'[^']*'|\{[^}]*\})\s*\)/g;
 
     var lastEntity = null;
-    var activeCountryCode = "";
 
     function parseData(data) {
         if (typeof data !== "string") {
@@ -199,7 +194,6 @@
         }
         var keys = [
             "ParticipatingCountryCode",
-            "CountryCode",
             "parent",
             "parentValue",
             "parentAttributeValue",
@@ -252,13 +246,22 @@
         return "";
     }
 
+    function selectedCountryFromFilter(filter) {
+        var quoted = String(filter || "").match(/equals\(\s*attributes\.CountryCode\s*,\s*'([^']*)'\s*\)/);
+        if (!quoted || !quoted[1] || quoted[1].indexOf("{") !== -1) {
+            return "";
+        }
+        return extractCode(quoted[1], lastEntity);
+    }
+
     function pickCountry(url, parsed, rawParams, entity) {
         var fromReq = countryFromRequest(url, parsed, rawParams, entity);
         if (fromReq) {
             return fromReq;
         }
-        if (activeCountryCode) {
-            return activeCountryCode;
+        var fromHubFilter = selectedCountryFromFilter((parsed && parsed.filter) || url);
+        if (fromHubFilter) {
+            return fromHubFilter;
         }
         var fromEntity = countriesFromEntity(entity || lastEntity);
         if (fromEntity.length === 1) {
@@ -267,12 +270,16 @@
         return "";
     }
 
-    function injectFilter(filter, code) {
-        if (!code) {
+    function injectFilter(filter, selectedCode) {
+        if (!selectedCode) {
             return filter;
         }
-        var clause = "equals(attributes.CountryCode, '" + code + "')";
+        var clause = "equals(attributes.CountryCode, '" + selectedCode + "')";
         var f = String(filter || "");
+        var existing = selectedCountryFromFilter(f);
+        if (existing === selectedCode) {
+            return f;
+        }
         var replaced = f.replace(COUNTRY_EQUALS_RE, clause);
         if (replaced !== f) {
             return replaced;
@@ -316,10 +323,6 @@
             return;
         }
         lastEntity = entity;
-        var codes = countriesFromEntity(entity);
-        if (codes.length === 1) {
-            activeCountryCode = codes[0];
-        }
     }
 
     function firstEntity(payload) {
@@ -507,17 +510,6 @@
     UI.onEvent(function (type, data) {
         if (type === "updateEntity") {
             rememberEntity(data);
-            var fromUpdate = walkExtract(data, data, 0);
-            if (fromUpdate) {
-                activeCountryCode = fromUpdate;
-            }
-            return;
-        }
-        if (type === "uiAction") {
-            var code = walkExtract(data, lastEntity, 0);
-            if (code) {
-                activeCountryCode = code;
-            }
         }
     });
 
@@ -553,7 +545,7 @@
                 }
                 var written = firstEntity(parsed);
                 if (written && written.type === SITE_TYPE && lastEntity && lastEntity.type === STUDY_TYPE) {
-                    var stampCode = activeCountryCode || pickCountry(url, parsed, urlOrParams, lastEntity);
+                    var stampCode = pickCountry(url, parsed, urlOrParams, lastEntity);
                     parsed = stampSiteCountry(parsed, stampCode);
                     data = typeof data === "string" ? JSON.stringify(parsed) : parsed;
                 }
