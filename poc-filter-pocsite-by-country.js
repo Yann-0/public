@@ -476,6 +476,12 @@
         var code = fromTree.code || pickCountry(url, parsed, rawParams, e);
         var label = fromTree.label;
         var rows = e && e.attributes && e.attributes.ParticipatingCountry;
+        if (Array.isArray(rows) && rows.length > 1 && (draftCountry.code || draftCountry.label)) {
+            return {
+                code: draftCountry.code || isoFromLabel(draftCountry.label),
+                label: draftCountry.label
+            };
+        }
         if (Array.isArray(rows) && rows.length === 1) {
             label = firstLabel((rows[0].value || rows[0]).ParticipatingCountryCode);
             if (!code) {
@@ -614,11 +620,17 @@
         if (!entity) {
             return;
         }
+        var cand = entity;
         if (entity.object && (entity.object.attributes || entity.object.type)) {
-            lastEntity = entity.object;
-        } else if (entity.attributes || entity.type) {
-            lastEntity = entity;
+            cand = entity.object;
         }
+        if (cand.type && cand.type !== STUDY_TYPE) {
+            return;
+        }
+        if (!cand.type && !cand.attributes) {
+            return;
+        }
+        lastEntity = cand;
         var rows = lastEntity && lastEntity.attributes && lastEntity.attributes.ParticipatingCountry;
         if (Array.isArray(rows) && rows.length === 1) {
             rememberDraftCountry((rows[0].value || rows[0]).ParticipatingCountryCode);
@@ -677,6 +689,18 @@
         );
     }
 
+    function countryEquals(a, b) {
+        if (!a || !b) {
+            return false;
+        }
+        if (a === b) {
+            return true;
+        }
+        var ac = isoFromLabel(a) || a;
+        var bc = isoFromLabel(b) || b;
+        return ac === bc;
+    }
+
     function mismatchMessage(countryCode) {
         return "A [POC] Site must belong to this participating country (" + countryCode + "). Pick a site of that country only.";
     }
@@ -717,12 +741,113 @@
             }
             for (var j = 0; j < links.length; j++) {
                 var siteCountry = siteCountryFromLink(links[j]);
-                if (siteCountry && siteCountry !== country) {
+                if (siteCountry && !countryEquals(siteCountry, country)) {
                     return mismatchMessage(country);
                 }
             }
         }
         return "";
+    }
+
+    function linkedSitesNeedingLookup(parsed) {
+        var pending = [];
+        var entity = firstEntity(parsed);
+        if (!entity || entity.type !== STUDY_TYPE) {
+            return pending;
+        }
+        var rows = entity.attributes && entity.attributes.ParticipatingCountry;
+        if (!Array.isArray(rows)) {
+            return pending;
+        }
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i].value || rows[i];
+            var country = countryFromNested(rows[i]);
+            if (!country) {
+                continue;
+            }
+            var links = row.LinkedSite;
+            if (!Array.isArray(links)) {
+                continue;
+            }
+            for (var j = 0; j < links.length; j++) {
+                if (siteCountryFromLink(links[j])) {
+                    continue;
+                }
+                var uri = linkedSiteUri(links[j]);
+                if (uri) {
+                    pending.push({ uri: uri, country: country });
+                }
+            }
+        }
+        return pending;
+    }
+
+    function finishWrite(url, verb, tenant, headers, data, parsed, callback) {
+        var written = firstEntity(parsed);
+        if (written && written.type === SITE_TYPE && lastEntity && lastEntity.type === STUDY_TYPE) {
+            var stampCode = pickCountry(url, parsed, null, lastEntity);
+            parsed = stampSiteCountry(parsed, stampCode);
+            data = typeof data === "string" ? JSON.stringify(parsed) : parsed;
+        }
+        return handleTestYannWrite(url, verb, tenant, headers, data, parsed, callback);
+    }
+
+    function validateLinkedSitesThenWrite(url, verb, tenant, headers, data, parsed, callback) {
+        var pending = linkedSitesNeedingLookup(parsed);
+        if (!pending.length) {
+            return finishWrite(url, verb, tenant, headers, data, parsed, callback);
+        }
+        var base = tenantEntitiesBase(url);
+        var left = pending.length;
+        var error = "";
+        function done() {
+            left -= 1;
+            if (left > 0) {
+                return;
+            }
+            if (error) {
+                return blockSave(callback, error);
+            }
+            finishWrite(url, verb, tenant, headers, data, parsed, callback);
+        }
+        for (var i = 0; i < pending.length; i++) {
+            (function (item) {
+                var id = String(item.uri).replace(/^entities\//, "");
+                var getUrl = base + "/" + id + "?select=uri,type,attributes.CountryCode,attributes.Name,label,secondaryLabel";
+                var settled = false;
+                function got(body) {
+                    if (settled) {
+                        return;
+                    }
+                    settled = true;
+                    var loaded = body;
+                    if (Array.isArray(body)) {
+                        loaded = body[0];
+                    }
+                    var selected = { code: item.country, label: item.country };
+                    if (loaded && resultCountryTokens(loaded).length && !siteMatchesSelected(loaded, selected)) {
+                        error = mismatchMessage(item.country);
+                    }
+                    done();
+                }
+                function fail() {
+                    if (settled) {
+                        return;
+                    }
+                    settled = true;
+                    done();
+                }
+                try {
+                    var ret = UI.api(getUrl, "GET", tenant, headers, null, got);
+                    if (ret && typeof ret.then === "function") {
+                        ret.then(got, fail);
+                    }
+                } catch (e) {
+                    fail();
+                }
+            })(pending[i]);
+        }
+        return null;
     }
 
     function stampSiteCountry(parsed, code) {
@@ -793,7 +918,7 @@
         }
         var tokens = resultCountryTokens(entity);
         if (!tokens.length) {
-            return true;
+            return false;
         }
         var wantCode = selected.code || isoFromLabel(selected.label);
         var wantLabel = String(selected.label || "").toLowerCase();
@@ -845,24 +970,151 @@
         return result;
     }
 
+    function tenantEntitiesBase(url) {
+        var u = String(url || "");
+        var idx = u.indexOf("/entities");
+        if (idx === -1) {
+            return u;
+        }
+        return u.slice(0, idx) + "/entities";
+    }
+
+    function collectEntities(result) {
+        if (Array.isArray(result)) {
+            return result.slice();
+        }
+        if (result && Array.isArray(result.result)) {
+            return result.result;
+        }
+        if (result && Array.isArray(result.entities)) {
+            return result.entities;
+        }
+        return [];
+    }
+
+    function putEntities(result, arr) {
+        if (Array.isArray(result)) {
+            return arr;
+        }
+        if (result && result.result) {
+            result.result = arr;
+        }
+        if (result && result.entities) {
+            result.entities = arr;
+        }
+        return result;
+    }
+
+    function hydrateAndFilter(result, selected, searchUrl, tenant, headers, status, respHeaders, callback) {
+        var arr = collectEntities(result);
+        if (!selected || (!selected.code && !selected.label)) {
+            if (typeof callback === "function") {
+                callback(result, status, respHeaders);
+            }
+            return;
+        }
+        if (!arr.length) {
+            if (typeof callback === "function") {
+                callback(result, status, respHeaders);
+            }
+            return;
+        }
+        var base = tenantEntitiesBase(searchUrl);
+        var pending = arr.length;
+        var hydrated = new Array(arr.length);
+        function tick() {
+            pending -= 1;
+            if (pending > 0) {
+                return;
+            }
+            var kept = [];
+            for (var i = 0; i < arr.length; i++) {
+                var ent = hydrated[i] || arr[i];
+                if (siteMatchesSelected(ent, selected)) {
+                    kept.push(arr[i]);
+                }
+            }
+            if (typeof callback === "function") {
+                callback(putEntities(result, kept), status, respHeaders);
+            }
+        }
+        for (var i = 0; i < arr.length; i++) {
+            (function (idx) {
+                var ent = arr[idx];
+                if (resultCountryTokens(ent).length) {
+                    hydrated[idx] = ent;
+                    tick();
+                    return;
+                }
+                var uri = (ent && (ent.uri || ent.entityId)) || "";
+                if (!uri || !base) {
+                    hydrated[idx] = ent;
+                    tick();
+                    return;
+                }
+                var id = String(uri).replace(/^entities\//, "");
+                var getUrl = base + "/" + id + "?select=uri,label,secondaryLabel,type,attributes.CountryCode,attributes.Name";
+                try {
+                    var settled = false;
+                    function got(body) {
+                        if (settled) {
+                            return;
+                        }
+                        settled = true;
+                        var loaded = body;
+                        if (Array.isArray(body)) {
+                            loaded = body[0];
+                        }
+                        hydrated[idx] = loaded || ent;
+                        tick();
+                    }
+                    var getRet = UI.api(getUrl, "GET", tenant, headers, null, got);
+                    if (getRet && typeof getRet.then === "function") {
+                        getRet.then(got, function () {
+                            got(ent);
+                        });
+                    }
+                } catch (e) {
+                    hydrated[idx] = ent;
+                    tick();
+                }
+            })(i);
+        }
+    }
+
     function applyTypeahead(url, verb, tenant, headers, data, parsed, urlOrParams, entity, callback) {
         var selected = pickSelected(url, parsed, urlOrParams, entity);
         if (!selected.code && !selected.label) {
             selected = { code: draftCountry.code, label: draftCountry.label };
         }
-        function finish(result, status, respHeaders) {
-            var out = filterResults(result, selected);
-            if (typeof callback === "function") {
-                callback(out, status, respHeaders);
-            }
-            return out;
+        if (!selected.code && selected.label) {
+            selected.code = isoFromLabel(selected.label);
         }
-        var nextData = stripUnresolvedCountryFilter(parsed, data);
-        var nextUrl = stripUnresolvedCountryFilterUrl(url);
-        var ret = UI.api(nextUrl, verb, tenant, headers, nextData, finish);
+        var code = selected.code || isoFromLabel(selected.label);
+        var nextData = data;
+        var nextUrl = url;
+        if (code || selected.label) {
+            var rewritten = rewriteBody(parsed || {}, code);
+            if (rewritten && typeof rewritten === "object" && !Array.isArray(rewritten)) {
+                nextData = typeof data === "string" ? JSON.stringify(rewritten) : rewritten;
+            }
+            nextUrl = rewriteUrl(url, code);
+        } else {
+            nextData = stripUnresolvedCountryFilter(parsed, data);
+            nextUrl = stripUnresolvedCountryFilterUrl(url);
+        }
+        var finished = false;
+        function after(result, status, respHeaders) {
+            if (finished) {
+                return;
+            }
+            finished = true;
+            hydrateAndFilter(result, selected, nextUrl, tenant, headers, status || 200, respHeaders || {}, callback);
+        }
+        var ret = UI.api(nextUrl, verb, tenant, headers, nextData, after);
         if (ret && typeof ret.then === "function") {
-            return ret.then(function (result) {
-                return filterResults(result, selected);
+            ret.then(function (result) {
+                after(result, 200, {});
             });
         }
         return ret;
@@ -918,13 +1170,11 @@
     }
 
     UI.onEvent(function (type, data) {
-        if (type === "updateEntity") {
+        if (type === "updateEntity" || type === "uiAction" || type === "editAttribute") {
             rememberEntity(data);
-            return;
-        }
-        if (type === "uiAction") {
-            if (data && data.attributes) {
-                rememberEntity(data);
+            var found = findParticipatingCountry(data, 0);
+            if (found.code || found.label) {
+                draftCountry = found;
             }
             if (
                 data &&
@@ -967,13 +1217,7 @@
                 if (studyError) {
                     return blockSave(callback, studyError);
                 }
-                var written = firstEntity(parsed);
-                if (written && written.type === SITE_TYPE && lastEntity && lastEntity.type === STUDY_TYPE) {
-                    var stampCode = pickCountry(url, parsed, urlOrParams, lastEntity);
-                    parsed = stampSiteCountry(parsed, stampCode);
-                    data = typeof data === "string" ? JSON.stringify(parsed) : parsed;
-                }
-                return handleTestYannWrite(url, verb, tenant, headers, data, parsed, callback);
+                return validateLinkedSitesThenWrite(url, verb, tenant, headers, data, parsed, callback);
             }
 
             return UI.api(url, verb, tenant, headers, data, callback);
