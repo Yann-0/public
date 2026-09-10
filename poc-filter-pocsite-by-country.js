@@ -14,6 +14,7 @@
     var COUNTRY_EQUALS_RE = /equals\(\s*attributes\.CountryCode\s*,\s*(?:'[^']*'|\{[^}]*\})\s*\)/g;
 
     var lastEntity = null;
+    var draftCountry = { code: "", label: "" };
     // Label → ISO 3166-1 alpha-2. Used only when Hub gives the selected country
     // name (Angola) without lookupCode. Not a hardcoded filter.
     var ISO_BY_NAME = {
@@ -152,16 +153,46 @@
         return method === "POST" || method === "PUT" || method === "PATCH";
     }
 
-    function isSiteSearch(url, parsed) {
+    function isTypeaheadUrl(url) {
         var u = String(url || "");
-        if (
-            !/\/entities\/_typeAheadSearch(?:[/?]|$)/.test(u) &&
-            !/\/entities\/_search(?:[/?]|$)/.test(u)
-        ) {
+        return (
+            /\/entities\/_typeAheadSearch(?:[/?]|$)/.test(u) ||
+            /\/entities\/_search(?:[/?]|$)/.test(u) ||
+            /\/entities\/_suggest(?:[/?]|$)/.test(u)
+        );
+    }
+
+    function requestBlob(url, parsed, rawParams) {
+        var extra = "";
+        if (rawParams && typeof rawParams === "object") {
+            extra += JSON.stringify({
+                type: rawParams.type || rawParams.entityType || rawParams.entityTypes || "",
+                select: rawParams.select || ""
+            });
+        }
+        return String(url || "") + JSON.stringify(parsed || {}) + extra;
+    }
+
+    function isOtherTypeSearch(blob) {
+        return (
+            /entityTypes\/(HCP|HCO|Location|Individual|POCInvestigator|POCStudy|POCParticipatingCountry)\b/.test(blob) &&
+            blob.indexOf("POCSite") === -1 &&
+            blob.indexOf(SITE_TYPE) === -1
+        );
+    }
+
+    function isSiteSearch(url, parsed, rawParams) {
+        var blob = requestBlob(url, parsed, rawParams);
+        if (blob.indexOf(SITE_TYPE) !== -1 || blob.indexOf("POCSite") !== -1) {
+            return isTypeaheadUrl(url) || /filter=/.test(String(url || "")) || /filter/.test(JSON.stringify(parsed || {}));
+        }
+        if (isOtherTypeSearch(blob)) {
             return false;
         }
-        var blob = u + JSON.stringify(parsed || {});
-        return blob.indexOf(SITE_TYPE) !== -1 || blob.indexOf("POCSite") !== -1;
+        if (!isTypeaheadUrl(url)) {
+            return false;
+        }
+        return !!(lastEntity && lastEntity.type === STUDY_TYPE);
     }
 
     function lookupCodeFrom(obj) {
@@ -418,6 +449,9 @@
         if (!code && label) {
             code = isoFromLabel(label);
         }
+        if (!code && !label && (draftCountry.code || draftCountry.label)) {
+            return { code: draftCountry.code, label: draftCountry.label };
+        }
         return { code: code, label: label };
     }
 
@@ -474,11 +508,37 @@
         return copy;
     }
 
-    function rememberEntity(entity) {
-        if (!entity || !entity.attributes) {
+    function rememberDraftCountry(node) {
+        if (node == null) {
             return;
         }
-        lastEntity = entity;
+        var label = lookupLabelFrom(node);
+        if (!label && typeof node === "string") {
+            label = node;
+        }
+        if (!label && node && typeof node.value === "string") {
+            label = node.value;
+        }
+        var code = lookupCodeFrom(node) || isoFromLabel(label);
+        if (!code && !label) {
+            return;
+        }
+        draftCountry = { code: code || isoFromLabel(label), label: label };
+    }
+
+    function rememberEntity(entity) {
+        if (!entity) {
+            return;
+        }
+        if (entity.object && (entity.object.attributes || entity.object.type)) {
+            lastEntity = entity.object;
+        } else if (entity.attributes || entity.type) {
+            lastEntity = entity;
+        }
+        var rows = lastEntity && lastEntity.attributes && lastEntity.attributes.ParticipatingCountry;
+        if (Array.isArray(rows) && rows.length === 1) {
+            rememberDraftCountry((rows[0].value || rows[0]).ParticipatingCountryCode);
+        }
     }
 
     function firstEntity(payload) {
@@ -602,20 +662,109 @@
         return parsed;
     }
 
+    function resultCountryTokens(entity) {
+        var tokens = [];
+        function add(v) {
+            if (v) {
+                tokens.push(String(v));
+            }
+        }
+        if (!entity) {
+            return tokens;
+        }
+        add(entity.secondaryLabel);
+        add(entity.secondaryLabelValue);
+        var cc = entity.attributes && entity.attributes.CountryCode;
+        if (cc) {
+            var arr = Array.isArray(cc) ? cc : [cc];
+            add(firstLookup(arr));
+            add(firstLabel(arr));
+        }
+        return tokens;
+    }
+
+    function siteMatchesSelected(entity, selected) {
+        if (!selected || (!selected.code && !selected.label)) {
+            return false;
+        }
+        var wantCode = selected.code || isoFromLabel(selected.label);
+        var wantLabel = String(selected.label || "").toLowerCase();
+        var tokens = resultCountryTokens(entity);
+        for (var i = 0; i < tokens.length; i++) {
+            var t = tokens[i];
+            if (wantCode && (t === wantCode || isoFromLabel(t) === wantCode)) {
+                return true;
+            }
+            if (wantLabel && String(t).toLowerCase() === wantLabel) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function filterResults(result, selected) {
+        if (!result) {
+            return result;
+        }
+        var arr = null;
+        if (Array.isArray(result)) {
+            arr = result;
+        } else if (result.result && Array.isArray(result.result)) {
+            arr = result.result;
+        } else if (result.entities && Array.isArray(result.entities)) {
+            arr = result.entities;
+        }
+        if (!arr) {
+            return selected && (selected.code || selected.label) ? result : [];
+        }
+        var kept = [];
+        for (var i = 0; i < arr.length; i++) {
+            if (siteMatchesSelected(arr[i], selected)) {
+                kept.push(arr[i]);
+            }
+        }
+        if (Array.isArray(result)) {
+            return kept;
+        }
+        if (result.result) {
+            result.result = kept;
+        }
+        if (result.entities) {
+            result.entities = kept;
+        }
+        return result;
+    }
+
     function applyTypeahead(url, verb, tenant, headers, data, parsed, urlOrParams, entity, callback) {
         var selected = pickSelected(url, parsed, urlOrParams, entity);
-        var clause = countryClause(selected.code, selected.label);
+        if (!selected.code && !selected.label) {
+            selected = { code: draftCountry.code, label: draftCountry.label };
+        }
+        function finish(result, status, respHeaders) {
+            var out = filterResults(result, selected);
+            if (typeof callback === "function") {
+                callback(out, status, respHeaders);
+            }
+            return out;
+        }
+        if (!selected.code && !selected.label) {
+            return finish([], 200, {});
+        }
         var nextUrl = url;
         var nextData = data;
-        if (clause) {
-            var rewritten = rewriteBody(parsed || {}, selected.code || selected.label);
-            if (rewritten && typeof rewritten === "object" && !Array.isArray(rewritten)) {
-                rewritten.filter = injectFilter(parsed && parsed.filter, selected.code || selected.label);
-            }
+        var rewritten = rewriteBody(parsed || {}, selected.code || selected.label);
+        if (rewritten && typeof rewritten === "object" && !Array.isArray(rewritten)) {
+            rewritten.filter = injectFilter(parsed && parsed.filter, selected.code || selected.label);
             nextData = typeof data === "string" ? JSON.stringify(rewritten) : rewritten;
-            nextUrl = rewriteUrl(url, selected.code || selected.label);
         }
-        return UI.api(nextUrl, verb, tenant, headers, nextData, callback);
+        nextUrl = rewriteUrl(url, selected.code || selected.label);
+        var ret = UI.api(nextUrl, verb, tenant, headers, nextData, finish);
+        if (ret && typeof ret.then === "function") {
+            return ret.then(function (result) {
+                return filterResults(result, selected);
+            });
+        }
+        return ret;
     }
 
     function nameValueTooLong(value) {
@@ -670,6 +819,20 @@
     UI.onEvent(function (type, data) {
         if (type === "updateEntity") {
             rememberEntity(data);
+            return;
+        }
+        if (type === "uiAction") {
+            if (data && data.attributes) {
+                rememberEntity(data);
+            }
+            if (
+                data &&
+                (data.lookupCode ||
+                    (data.value && data.value.lookupCode) ||
+                    isoFromLabel(lookupLabelFrom(data) || data.value || data))
+            ) {
+                rememberDraftCountry(data);
+            }
         }
     });
 
@@ -686,7 +849,7 @@
         var verb = methodOf(urlOrParams, method);
 
         try {
-            if (isSiteSearch(url, parsed)) {
+            if (isSiteSearch(url, parsed, urlOrParams)) {
                 return UI.getEntity().then(
                     function (entity) {
                         rememberEntity(entity);
