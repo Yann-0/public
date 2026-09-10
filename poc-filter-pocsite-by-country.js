@@ -35,10 +35,15 @@
     }
 
     function isSiteSearch(url, parsed) {
-        if (!/\/entities(\/_|\/?\?)/.test(url) && !/_typeAheadSearch|_search/.test(url)) {
+        var u = String(url || "");
+        // Only typeahead/search. Never POST /entities?options=… (create/update).
+        if (
+            !/\/entities\/_typeAheadSearch(?:[/?]|$)/.test(u) &&
+            !/\/entities\/_search(?:[/?]|$)/.test(u)
+        ) {
             return false;
         }
-        var blob = url + JSON.stringify(parsed || {});
+        var blob = u + JSON.stringify(parsed || {});
         return blob.indexOf(SITE_TYPE) !== -1 || blob.indexOf("POCSite") !== -1;
     }
 
@@ -202,31 +207,35 @@
             tenant = urlOrParams.tenant;
         }
         var verb = methodOf(urlOrParams, method);
-        if (!isSiteSearch(url, parsed)) {
-            return UI.api(url, verb, tenant, headers, data, callback);
-        }
-
-        function apply(entity) {
-            var code = pickCountry(url, parsed, urlOrParams, entity);
-            if (!code) {
+        try {
+            if (!isSiteSearch(url, parsed)) {
                 return UI.api(url, verb, tenant, headers, data, callback);
             }
-            var nextUrl = rewriteUrl(url, code);
-            var nextData = data;
-            if (verb === "POST" || verb === "PUT" || verb === "PATCH") {
-                var rewritten = rewriteBody(parsed, code);
-                nextData = typeof data === "string" ? JSON.stringify(rewritten) : rewritten;
-            }
-            return UI.api(nextUrl, verb, tenant, headers, nextData, callback);
-        }
 
-        return UI.getEntity().then(
-            function (entity) {
-                return apply(entity);
-            },
-            function () {
-                return apply(null);
+            function apply(entity) {
+                var code = pickCountry(url, parsed, urlOrParams, entity);
+                if (!code) {
+                    return UI.api(url, verb, tenant, headers, data, callback);
+                }
+                var nextUrl = rewriteUrl(url, code);
+                var nextData = data;
+                if (verb === "POST" || verb === "PUT" || verb === "PATCH") {
+                    var rewritten = rewriteBody(parsed, code);
+                    nextData = typeof data === "string" ? JSON.stringify(rewritten) : rewritten;
+                }
+                return UI.api(nextUrl, verb, tenant, headers, nextData, callback);
             }
-        );
+
+            return UI.getEntity().then(
+                function (entity) {
+                    return apply(entity);
+                },
+                function () {
+                    return apply(null);
+                }
+            );
+        } catch (e) {
+            return UI.api(url, verb, tenant, headers, data, callback);
+        }
     });
 })();

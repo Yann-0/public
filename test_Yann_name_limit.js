@@ -13,6 +13,7 @@
     var nameMeta = null;
     var entityUri = null;
     var canRender = false;
+    var onTestYann = false;
 
     function parseData(data) {
         if (typeof data !== "string") {
@@ -118,6 +119,9 @@
         if (typeof payload !== "object") {
             return false;
         }
+        if (payload.type && payload.type !== ENTITY_TYPE && payload.type !== NAME_TYPE) {
+            return false;
+        }
         if (payload.object && payloadNameTooLong(payload.object)) {
             return true;
         }
@@ -129,9 +133,6 @@
         }
         if (deepNameTooLong(payload, false)) {
             return true;
-        }
-        if (payload.type && payload.type !== ENTITY_TYPE && payload.type !== NAME_TYPE) {
-            return false;
         }
         return payload.value != null && nameValueTooLong(payload.value);
     }
@@ -162,7 +163,8 @@
     }
 
     function applyEntity(entity) {
-        if (!isTestYann(entity)) {
+        onTestYann = isTestYann(entity);
+        if (!onTestYann) {
             return;
         }
         entityUri = entity.uri || entityUri;
@@ -252,30 +254,34 @@
 
     function handleWrite(url, method, tenant, headers, data, callback) {
         var parsed = parseData(data);
-        if (currentName.length > MAX_LEN || payloadNameTooLong(parsed)) {
-            return block(callback);
-        }
-        if (!shouldInspect(url, parsed)) {
+        var entity = firstEntity(parsed);
+
+        function pass() {
             return UI.api(url, method, tenant, headers, data, callback);
         }
-        var entity = firstEntity(parsed);
-        if (isTestYann(entity) || payloadNameTooLong(parsed)) {
-            return payloadNameTooLong(parsed) ? block(callback) : UI.api(url, method, tenant, headers, data, callback);
+
+        function enforce() {
+            if (currentName.length > MAX_LEN || payloadNameTooLong(parsed)) {
+                return block(callback);
+            }
+            return pass();
+        }
+
+        if (isTestYann(entity)) {
+            return enforce();
+        }
+        if (entity && entity.type) {
+            return pass();
         }
         return UI.getEntity().then(
             function (loaded) {
                 if (!isTestYann(loaded)) {
-                    return UI.api(url, method, tenant, headers, data, callback);
+                    return pass();
                 }
                 applyEntity(loaded);
-                if (currentName.length > MAX_LEN || payloadNameTooLong(parsed)) {
-                    return block(callback);
-                }
-                return UI.api(url, method, tenant, headers, data, callback);
+                return enforce();
             },
-            function () {
-                return UI.api(url, method, tenant, headers, data, callback);
-            }
+            pass
         );
     }
 
@@ -295,6 +301,9 @@
             return;
         }
         if (type === "uiAction") {
+            if (!onTestYann) {
+                return;
+            }
             var next = valueFromUiAction(data);
             if (next != null) {
                 currentName = next;
