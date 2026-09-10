@@ -429,10 +429,52 @@
         return "";
     }
 
+    function findParticipatingCountry(node, depth) {
+        if (!node || depth > 8 || typeof node !== "object") {
+            return { code: "", label: "" };
+        }
+        if (node.ParticipatingCountryCode) {
+            var arr = node.ParticipatingCountryCode;
+            return {
+                code: firstLookup(arr) || isoFromLabel(firstLabel(arr)),
+                label: firstLabel(arr)
+            };
+        }
+        if (Array.isArray(node)) {
+            for (var i = 0; i < node.length; i++) {
+                var found = findParticipatingCountry(node[i], depth + 1);
+                if (found.code || found.label) {
+                    return found;
+                }
+            }
+            return { code: "", label: "" };
+        }
+        for (var k in node) {
+            if (!Object.prototype.hasOwnProperty.call(node, k)) {
+                continue;
+            }
+            if (k === "filter" || k === "select") {
+                continue;
+            }
+            var nested = findParticipatingCountry(node[k], depth + 1);
+            if (nested.code || nested.label) {
+                return nested;
+            }
+        }
+        return { code: "", label: "" };
+    }
+
     function pickSelected(url, parsed, rawParams, entity) {
+        var fromTree = findParticipatingCountry(parsed, 0);
+        if (!fromTree.code && !fromTree.label) {
+            fromTree = findParticipatingCountry(rawParams, 0);
+        }
         var e = entity || lastEntity;
-        var code = pickCountry(url, parsed, rawParams, e);
-        var label = "";
+        if (!fromTree.code && !fromTree.label) {
+            fromTree = findParticipatingCountry(e, 0);
+        }
+        var code = fromTree.code || pickCountry(url, parsed, rawParams, e);
+        var label = fromTree.label;
         var rows = e && e.attributes && e.attributes.ParticipatingCountry;
         if (Array.isArray(rows) && rows.length === 1) {
             label = firstLabel((rows[0].value || rows[0]).ParticipatingCountryCode);
@@ -453,6 +495,48 @@
             return { code: draftCountry.code, label: draftCountry.label };
         }
         return { code: code, label: label };
+    }
+
+    function removeCountryEquals(filter) {
+        var f = String(filter || "");
+        f = f.replace(/\s*and\s*equals\(\s*attributes\.CountryCode\s*,\s*(?:'[^']*'|\{[^}]*\})\s*\)/gi, "");
+        f = f.replace(/equals\(\s*attributes\.CountryCode\s*,\s*(?:'[^']*'|\{[^}]*\})\s*\)\s*and\s*/gi, "");
+        f = f.replace(/equals\(\s*attributes\.CountryCode\s*,\s*(?:'[^']*'|\{[^}]*\})\s*\)/gi, "");
+        f = f.replace(/\(\s*and\s*/g, "(");
+        f = f.replace(/\s*and\s*\)/g, ")");
+        f = f.replace(/\(\s*\)/g, "");
+        return f.replace(/^\s+|\s+$/g, "");
+    }
+
+    function stripUnresolvedCountryFilter(parsed, data) {
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            return typeof data === "string" ? stripUnresolvedCountryFilterUrl(data) : data;
+        }
+        var copy = {};
+        for (var k in parsed) {
+            if (Object.prototype.hasOwnProperty.call(parsed, k)) {
+                copy[k] = parsed[k];
+            }
+        }
+        if (copy.filter) {
+            copy.filter = removeCountryEquals(parsed.filter);
+        }
+        return typeof data === "string" ? JSON.stringify(copy) : copy;
+    }
+
+    function stripUnresolvedCountryFilterUrl(url) {
+        if (!url || !/([?&])filter=/.test(url)) {
+            return url;
+        }
+        return url.replace(/([?&]filter=)([^&]*)/, function (all, p1, p2) {
+            try {
+                var decoded = decodeURIComponent(p2);
+                var next = removeCountryEquals(decoded);
+                return p1 + encodeURIComponent(next);
+            } catch (e) {
+                return all;
+            }
+        });
     }
 
     function injectFilter(filter, selectedCode) {
@@ -662,10 +746,28 @@
         return parsed;
     }
 
+    function addCountryTokensFromText(text, tokens) {
+        if (!text) {
+            return;
+        }
+        var parts = String(text).split(/[,()]/);
+        for (var i = 0; i < parts.length; i++) {
+            var t = parts[i].replace(/^\s+|\s+$/g, "");
+            if (!t) {
+                continue;
+            }
+            if (/^[A-Z]{2,3}$/.test(t) || isoFromLabel(t)) {
+                if (tokens.indexOf(t) === -1) {
+                    tokens.push(t);
+                }
+            }
+        }
+    }
+
     function resultCountryTokens(entity) {
         var tokens = [];
         function add(v) {
-            if (v) {
+            if (v && tokens.indexOf(String(v)) === -1) {
                 tokens.push(String(v));
             }
         }
@@ -674,6 +776,8 @@
         }
         add(entity.secondaryLabel);
         add(entity.secondaryLabelValue);
+        addCountryTokensFromText(entity.label, tokens);
+        addCountryTokensFromText(entity.secondaryLabel, tokens);
         var cc = entity.attributes && entity.attributes.CountryCode;
         if (cc) {
             var arr = Array.isArray(cc) ? cc : [cc];
@@ -685,11 +789,14 @@
 
     function siteMatchesSelected(entity, selected) {
         if (!selected || (!selected.code && !selected.label)) {
-            return false;
+            return true;
+        }
+        var tokens = resultCountryTokens(entity);
+        if (!tokens.length) {
+            return true;
         }
         var wantCode = selected.code || isoFromLabel(selected.label);
         var wantLabel = String(selected.label || "").toLowerCase();
-        var tokens = resultCountryTokens(entity);
         for (var i = 0; i < tokens.length; i++) {
             var t = tokens[i];
             if (wantCode && (t === wantCode || isoFromLabel(t) === wantCode)) {
@@ -706,6 +813,9 @@
         if (!result) {
             return result;
         }
+        if (!selected || (!selected.code && !selected.label)) {
+            return result;
+        }
         var arr = null;
         if (Array.isArray(result)) {
             arr = result;
@@ -715,7 +825,7 @@
             arr = result.entities;
         }
         if (!arr) {
-            return selected && (selected.code || selected.label) ? result : [];
+            return result;
         }
         var kept = [];
         for (var i = 0; i < arr.length; i++) {
@@ -747,17 +857,8 @@
             }
             return out;
         }
-        if (!selected.code && !selected.label) {
-            return finish([], 200, {});
-        }
-        var nextUrl = url;
-        var nextData = data;
-        var rewritten = rewriteBody(parsed || {}, selected.code || selected.label);
-        if (rewritten && typeof rewritten === "object" && !Array.isArray(rewritten)) {
-            rewritten.filter = injectFilter(parsed && parsed.filter, selected.code || selected.label);
-            nextData = typeof data === "string" ? JSON.stringify(rewritten) : rewritten;
-        }
-        nextUrl = rewriteUrl(url, selected.code || selected.label);
+        var nextData = stripUnresolvedCountryFilter(parsed, data);
+        var nextUrl = stripUnresolvedCountryFilterUrl(url);
         var ret = UI.api(nextUrl, verb, tenant, headers, nextData, finish);
         if (ret && typeof ret.then === "function") {
             return ret.then(function (result) {
