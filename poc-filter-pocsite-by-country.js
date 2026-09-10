@@ -552,7 +552,7 @@
                     return blockSave(callback, studyError);
                 }
                 var written = firstEntity(parsed);
-                if (written && written.type === SITE_TYPE) {
+                if (written && written.type === SITE_TYPE && lastEntity && lastEntity.type === STUDY_TYPE) {
                     var stampCode = activeCountryCode || pickCountry(url, parsed, urlOrParams, lastEntity);
                     parsed = stampSiteCountry(parsed, stampCode);
                     data = typeof data === "string" ? JSON.stringify(parsed) : parsed;
