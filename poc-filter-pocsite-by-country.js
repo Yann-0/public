@@ -1,8 +1,9 @@
 /**
  * POC Hub: [POC] Site picker is scoped to the participating country.
  *
- * Sites are a Reference on [POC] Participating Country (sibling of CountryCode).
- * Creating a site POSTs a [POC] Site into the catalog with that country.
+ * Hub typeahead for an inline Reference is often GET /entities?filter=...,
+ * not _typeAheadSearch. Results are filtered by the country of the current row
+ * (label already contains the country, e.g. "a siite (Angola)").
  */
 (function () {
     var SITE_TYPE = "configuration/entityTypes/POCSite";
@@ -152,6 +153,13 @@
         return "";
     }
 
+    function foundOrDraft(found) {
+        return {
+            code: found.code || isoFromLabel(found.label),
+            label: found.label
+        };
+    }
+
     function countryFromEntity(entity) {
         if (!entity || !entity.attributes) {
             return { code: "", label: "" };
@@ -163,17 +171,54 @@
         };
     }
 
+    function findCountryDeep(node, depth) {
+        if (!node || depth > 8 || typeof node !== "object") {
+            return { code: "", label: "" };
+        }
+        if (node.ParticipatingCountryCode) {
+            var arr = node.ParticipatingCountryCode;
+            return {
+                code: firstOf(arr, lookupCodeFrom) || isoFromLabel(firstOf(arr, lookupLabelFrom)),
+                label: firstOf(arr, lookupLabelFrom)
+            };
+        }
+        if (Array.isArray(node)) {
+            for (var i = 0; i < node.length; i++) {
+                var found = findCountryDeep(node[i], depth + 1);
+                if (found.code || found.label) {
+                    return found;
+                }
+            }
+            return { code: "", label: "" };
+        }
+        var skip = { filter: 1, select: 1, Sites: 1, LinkedSite: 1 };
+        for (var k in node) {
+            if (!Object.prototype.hasOwnProperty.call(node, k) || skip[k]) {
+                continue;
+            }
+            var nested = findCountryDeep(node[k], depth + 1);
+            if (nested.code || nested.label) {
+                return nested;
+            }
+        }
+        return { code: "", label: "" };
+    }
+
     function rememberEntity(entity) {
         if (!entity) {
             return;
         }
         var cand = entity.object && entity.object.type ? entity.object : entity;
-        if (!cand.type) {
+        if (!cand.type || cand.type === SITE_TYPE) {
             return;
         }
         lastEntity = cand;
         if (cand.type === STUDY_TYPE) {
             lastStudyId = attrText(cand.attributes && cand.attributes.StudyId) || lastStudyId;
+            var fromStudy = findCountryDeep(cand, 0);
+            if (fromStudy.code || fromStudy.label) {
+                draftCountry = foundOrDraft(fromStudy);
+            }
         }
         if (cand.type === COUNTRY_TYPE) {
             var found = countryFromEntity(cand);
@@ -199,11 +244,18 @@
     }
 
     function selectedCountry(entity) {
-        var fromEntity = countryFromEntity(entity || lastEntity);
-        if (fromEntity.code || fromEntity.label) {
-            return fromEntity;
+        var e = entity || lastEntity;
+        var fromEntity = countryFromEntity(e);
+        if (!fromEntity.code && !fromEntity.label) {
+            fromEntity = findCountryDeep(e, 0);
         }
-        return { code: draftCountry.code, label: draftCountry.label };
+        if (fromEntity.code || fromEntity.label) {
+            return foundOrDraft(fromEntity);
+        }
+        return {
+            code: draftCountry.code || isoFromLabel(draftCountry.label),
+            label: draftCountry.label
+        };
     }
 
     function countryClause(code, label) {
@@ -230,24 +282,40 @@
         return "(" + parts.join(" or ") + ")";
     }
 
+    function isSingleEntityGet(url) {
+        return /\/entities\/[A-Za-z0-9._=-]+(?:\?|$)/.test(String(url || ""));
+    }
+
     function isTypeaheadUrl(url) {
         var u = String(url || "");
+        if (isSingleEntityGet(u) && u.indexOf("_typeAhead") === -1) {
+            return false;
+        }
         return (
             /\/entities\/_typeAheadSearch(?:[/?]|$)/.test(u) ||
             /\/entities\/_search(?:[/?]|$)/.test(u) ||
-            /\/entities\/_suggest(?:[/?]|$)/.test(u)
+            /\/entities\/_suggest(?:[/?]|$)/.test(u) ||
+            /\/entities\/_scan(?:[/?]|$)/.test(u) ||
+            /\/entities\?/.test(u)
         );
     }
 
-    function isSiteSearch(url, parsed) {
-        if (!isTypeaheadUrl(url)) {
+    function isSiteSearch(url, parsed, rawParams) {
+        var blob = String(url || "") + JSON.stringify(parsed || {});
+        if (rawParams && typeof rawParams === "object") {
+            blob += JSON.stringify(rawParams.type || rawParams.entityType || "");
+        }
+        if (
+            /entityTypes\/(HCP|HCO|Location|Individual|POCInvestigator|POCStudy|POCParticipatingCountry)\b/.test(blob) &&
+            blob.indexOf("POCSite") === -1
+        ) {
             return false;
         }
-        var blob = String(url || "") + JSON.stringify(parsed || {});
-        if (blob.indexOf("POCSite") !== -1 || blob.indexOf(SITE_TYPE) !== -1) {
-            return true;
+        var looksSite = blob.indexOf("POCSite") !== -1 || blob.indexOf(SITE_TYPE) !== -1;
+        if (!looksSite && !(lastEntity && (lastEntity.type === COUNTRY_TYPE || lastEntity.type === STUDY_TYPE))) {
+            return false;
         }
-        return !!(lastEntity && lastEntity.type === COUNTRY_TYPE);
+        return isTypeaheadUrl(url) || looksSite;
     }
 
     function injectFilter(filter, selected) {
@@ -298,19 +366,151 @@
         return copy;
     }
 
+    function addCountryTokensFromText(text, tokens) {
+        if (!text) {
+            return;
+        }
+        var parts = String(text).split(/[,()]/);
+        for (var i = 0; i < parts.length; i++) {
+            var t = parts[i].replace(/^\s+|\s+$/g, "");
+            if (!t) {
+                continue;
+            }
+            if (/^[A-Z]{2,3}$/.test(t) || isoFromLabel(t)) {
+                if (tokens.indexOf(t) === -1) {
+                    tokens.push(t);
+                }
+            }
+        }
+    }
+
+    function siteCountryTokens(entity) {
+        var tokens = [];
+        function add(v) {
+            if (v && tokens.indexOf(String(v)) === -1) {
+                tokens.push(String(v));
+            }
+        }
+        if (!entity) {
+            return tokens;
+        }
+        add(entity.secondaryLabel);
+        add(entity.secondaryLabelValue);
+        addCountryTokensFromText(entity.label, tokens);
+        addCountryTokensFromText(entity.secondaryLabel, tokens);
+        var cc = entity.attributes && entity.attributes.CountryCode;
+        if (cc) {
+            var arr = Array.isArray(cc) ? cc : [cc];
+            add(lookupCodeFrom(arr[0]));
+            add(lookupLabelFrom(arr[0]));
+        }
+        return tokens;
+    }
+
+    function countryEquals(a, b) {
+        if (!a || !b) {
+            return false;
+        }
+        if (a === b) {
+            return true;
+        }
+        return (isoFromLabel(a) || a) === (isoFromLabel(b) || b);
+    }
+
+    function siteMatchesCountry(entity, country) {
+        if (!country) {
+            return false;
+        }
+        var tokens = siteCountryTokens(entity);
+        if (!tokens.length) {
+            return false;
+        }
+        var want = isoFromLabel(country) || country;
+        for (var i = 0; i < tokens.length; i++) {
+            if (countryEquals(tokens[i], country) || countryEquals(tokens[i], want)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function collectEntities(result) {
+        if (Array.isArray(result)) {
+            return result;
+        }
+        if (result && Array.isArray(result.result)) {
+            return result.result;
+        }
+        if (result && Array.isArray(result.entities)) {
+            return result.entities;
+        }
+        return null;
+    }
+
+    function putEntities(result, arr) {
+        if (Array.isArray(result)) {
+            return arr;
+        }
+        if (result && result.result) {
+            result.result = arr;
+        }
+        if (result && result.entities) {
+            result.entities = arr;
+        }
+        return result;
+    }
+
+    function filterSiteResults(result, selected) {
+        var arr = collectEntities(result);
+        if (!arr) {
+            return selected && (selected.code || selected.label) ? [] : result;
+        }
+        if (!selected || (!selected.code && !selected.label)) {
+            return putEntities(result, []);
+        }
+        var want = selected.code || isoFromLabel(selected.label);
+        var kept = [];
+        for (var i = 0; i < arr.length; i++) {
+            if (siteMatchesCountry(arr[i], want || selected.label)) {
+                kept.push(arr[i]);
+            }
+        }
+        return putEntities(result, kept);
+    }
+
     function applyTypeahead(url, verb, tenant, headers, data, parsed, callback) {
         var selected = selectedCountry(lastEntity);
         if (!selected.code && selected.label) {
             selected.code = isoFromLabel(selected.label);
         }
-        var nextUrl = url;
-        var nextData = data;
-        if (selected.code || selected.label) {
-            var rewritten = rewriteBody(parsed, selected);
-            nextData = typeof data === "string" ? JSON.stringify(rewritten) : rewritten;
-            nextUrl = rewriteUrl(url, selected);
+        function finish(result, status, respHeaders) {
+            var out = filterSiteResults(result, selected);
+            if (typeof callback === "function") {
+                callback(out, status, respHeaders);
+            }
+            return out;
         }
-        return UI.api(nextUrl, verb, tenant, headers, nextData, callback);
+        if (!selected.code && !selected.label) {
+            return finish([], 200, {});
+        }
+        var rewritten = rewriteBody(parsed, selected);
+        var nextData = typeof data === "string" ? JSON.stringify(rewritten) : rewritten;
+        var nextUrl = rewriteUrl(url, selected);
+        var done = false;
+        function after(result, status, respHeaders) {
+            if (done) {
+                return;
+            }
+            done = true;
+            finish(result, status || 200, respHeaders || {});
+        }
+        var ret = UI.api(nextUrl, verb, tenant, headers, nextData, after);
+        if (ret && typeof ret.then === "function") {
+            ret.then(function (result) {
+                after(result, 200, {});
+            });
+        }
+        return ret;
     }
 
     function setLookup(entity, name, code, label) {
@@ -356,46 +556,6 @@
         return parsed;
     }
 
-    function siteCountryTokens(entity) {
-        var tokens = [];
-        function add(v) {
-            if (v && tokens.indexOf(String(v)) === -1) {
-                tokens.push(String(v));
-            }
-        }
-        if (!entity) {
-            return tokens;
-        }
-        add(entity.secondaryLabel);
-        var cc = entity.attributes && entity.attributes.CountryCode;
-        if (cc) {
-            var arr = Array.isArray(cc) ? cc : [cc];
-            add(lookupCodeFrom(arr[0]));
-            add(lookupLabelFrom(arr[0]));
-        }
-        return tokens;
-    }
-
-    function countryEquals(a, b) {
-        if (!a || !b) {
-            return false;
-        }
-        if (a === b) {
-            return true;
-        }
-        return (isoFromLabel(a) || a) === (isoFromLabel(b) || b);
-    }
-
-    function siteMatchesCountry(entity, country) {
-        var tokens = siteCountryTokens(entity);
-        for (var i = 0; i < tokens.length; i++) {
-            if (countryEquals(tokens[i], country)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     function mismatchMessage(country) {
         return (
             "A [POC] Site must belong to this participating country (" +
@@ -439,9 +599,15 @@
             (val.refEntity && val.refEntity.attributes && val.refEntity.attributes.CountryCode);
         if (attrs) {
             var arr = Array.isArray(attrs) ? attrs : [attrs];
-            return firstOf(arr, lookupCodeFrom);
+            var code = firstOf(arr, lookupCodeFrom);
+            if (code) {
+                return code;
+            }
         }
-        return "";
+        var tokens = [];
+        addCountryTokensFromText(val.label || link.label, tokens);
+        addCountryTokensFromText(val.secondaryLabel || link.secondaryLabel, tokens);
+        return tokens[0] ? isoFromLabel(tokens[0]) || tokens[0] : "";
     }
 
     function collectSiteChecks(parsed) {
@@ -559,11 +725,13 @@
     }
 
     UI.onEvent(function (type, data) {
-        if (type === "updateEntity" || type === "uiAction" || type === "editAttribute") {
-            rememberEntity(data);
-            if (data && (data.lookupCode || isoFromLabel(lookupLabelFrom(data) || data.value || data))) {
-                rememberDraftCountry(data);
-            }
+        rememberEntity(data);
+        var deep = findCountryDeep(data, 0);
+        if (deep.code || deep.label) {
+            draftCountry = foundOrDraft(deep);
+        }
+        if (data && (data.lookupCode || isoFromLabel(lookupLabelFrom(data) || data.value || data))) {
+            rememberDraftCountry(data);
         }
     });
 
@@ -580,7 +748,7 @@
         var verb = methodOf(urlOrParams, method);
         try {
             UI.getEntity().then(rememberEntity, function () {});
-            if (isSiteSearch(url, parsed)) {
+            if (isSiteSearch(url, parsed, urlOrParams)) {
                 return UI.getEntity().then(
                     function (entity) {
                         rememberEntity(entity);
