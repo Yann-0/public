@@ -1,12 +1,18 @@
 /**
- * POC Hub: reject a [POC] Site that does not belong to the participating country.
+ * POC Hub: [POC] Site picker is scoped to the participating country.
  *
- * Nested Reference typeahead cannot be filtered by Hub. This script does not
- * intercept typeahead. It only validates Study save (same path as test_Yann).
+ * Sites are a Reference on [POC] Participating Country (sibling of CountryCode).
+ * Creating a site POSTs a [POC] Site into the catalog with that country.
  */
 (function () {
     var SITE_TYPE = "configuration/entityTypes/POCSite";
     var STUDY_TYPE = "configuration/entityTypes/POCStudy";
+    var COUNTRY_TYPE = "configuration/entityTypes/POCParticipatingCountry";
+    var COUNTRY_EQUALS_RE = /equals\(\s*attributes\.CountryCode\s*,\s*(?:'[^']*'|\{[^}]*\})\s*\)/g;
+
+    var lastEntity = null;
+    var draftCountry = { code: "", label: "" };
+    var lastStudyId = "";
 
     var ISO_BY_NAME = {
         afghanistan: "AF", albania: "AL", algeria: "DZ", angola: "AO",
@@ -63,6 +69,10 @@
         return method === "POST" || method === "PUT" || method === "PATCH";
     }
 
+    function quoteLookup(value) {
+        return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    }
+
     function lookupCodeFrom(obj) {
         if (obj == null) {
             return "";
@@ -111,15 +121,6 @@
         return fn(arr[0]);
     }
 
-    function countryFromNested(nested) {
-        var val = (nested && nested.value) || nested || {};
-        return (
-            firstOf(val.ParticipatingCountryCode, lookupCodeFrom) ||
-            firstOf(val.CountryCode, lookupCodeFrom) ||
-            lookupCodeFrom(val)
-        );
-    }
-
     function firstEntity(payload) {
         if (!payload) {
             return null;
@@ -145,25 +146,214 @@
         if (Array.isArray(attr)) {
             return attrText(attr[0]);
         }
-        if (typeof attr === "object") {
-            if (attr.value != null && typeof attr.value !== "object") {
-                return String(attr.value);
-            }
-            return lookupLabelFrom(attr);
+        if (typeof attr === "object" && attr.value != null && typeof attr.value !== "object") {
+            return String(attr.value);
         }
         return "";
     }
 
-    function linkedSiteUri(link) {
-        var val = (link && link.value) || link || {};
+    function countryFromEntity(entity) {
+        if (!entity || !entity.attributes) {
+            return { code: "", label: "" };
+        }
+        var arr = entity.attributes.ParticipatingCountryCode || entity.attributes.CountryCode;
+        return {
+            code: firstOf(arr, lookupCodeFrom) || isoFromLabel(firstOf(arr, lookupLabelFrom)),
+            label: firstOf(arr, lookupLabelFrom)
+        };
+    }
+
+    function rememberEntity(entity) {
+        if (!entity) {
+            return;
+        }
+        var cand = entity.object && entity.object.type ? entity.object : entity;
+        if (!cand.type) {
+            return;
+        }
+        lastEntity = cand;
+        if (cand.type === STUDY_TYPE) {
+            lastStudyId = attrText(cand.attributes && cand.attributes.StudyId) || lastStudyId;
+        }
+        if (cand.type === COUNTRY_TYPE) {
+            var found = countryFromEntity(cand);
+            if (found.code || found.label) {
+                draftCountry = found;
+            }
+        }
+    }
+
+    function rememberDraftCountry(node) {
+        if (node == null) {
+            return;
+        }
+        var label = lookupLabelFrom(node);
+        if (!label && typeof node === "string") {
+            label = node;
+        }
+        var code = lookupCodeFrom(node) || isoFromLabel(label);
+        if (!code && !label) {
+            return;
+        }
+        draftCountry = { code: code || isoFromLabel(label), label: label };
+    }
+
+    function selectedCountry(entity) {
+        var fromEntity = countryFromEntity(entity || lastEntity);
+        if (fromEntity.code || fromEntity.label) {
+            return fromEntity;
+        }
+        return { code: draftCountry.code, label: draftCountry.label };
+    }
+
+    function countryClause(code, label) {
+        var parts = [];
+        function add(v) {
+            if (!v) {
+                return;
+            }
+            var c = "equals(attributes.CountryCode, '" + quoteLookup(v) + "')";
+            if (parts.indexOf(c) === -1) {
+                parts.push(c);
+            }
+        }
+        add(code);
+        if (label && label !== code) {
+            add(label);
+        }
+        if (!parts.length) {
+            return "";
+        }
+        if (parts.length === 1) {
+            return parts[0];
+        }
+        return "(" + parts.join(" or ") + ")";
+    }
+
+    function isTypeaheadUrl(url) {
+        var u = String(url || "");
         return (
-            val.entityId ||
-            val.objectURI ||
-            (val.refEntity && (val.refEntity.objectURI || val.refEntity.uri)) ||
-            (link.refEntity && (link.refEntity.objectURI || link.refEntity.uri)) ||
-            val.uri ||
-            ""
+            /\/entities\/_typeAheadSearch(?:[/?]|$)/.test(u) ||
+            /\/entities\/_search(?:[/?]|$)/.test(u) ||
+            /\/entities\/_suggest(?:[/?]|$)/.test(u)
         );
+    }
+
+    function isSiteSearch(url, parsed) {
+        if (!isTypeaheadUrl(url)) {
+            return false;
+        }
+        var blob = String(url || "") + JSON.stringify(parsed || {});
+        if (blob.indexOf("POCSite") !== -1 || blob.indexOf(SITE_TYPE) !== -1) {
+            return true;
+        }
+        return !!(lastEntity && lastEntity.type === COUNTRY_TYPE);
+    }
+
+    function injectFilter(filter, selected) {
+        var clause = countryClause(selected.code, selected.label);
+        if (!clause) {
+            return filter;
+        }
+        var f = String(filter || "");
+        var replaced = f.replace(COUNTRY_EQUALS_RE, clause);
+        if (replaced !== f) {
+            return replaced;
+        }
+        if (!f) {
+            return "(equals(type,'" + SITE_TYPE + "') and " + clause + ")";
+        }
+        return "(" + f + " and " + clause + ")";
+    }
+
+    function rewriteUrl(url, selected) {
+        var clause = countryClause(selected.code, selected.label);
+        if (!clause) {
+            return url;
+        }
+        if (/([?&])filter=/.test(url)) {
+            return url.replace(/([?&]filter=)([^&]*)/, function (all, p1, p2) {
+                try {
+                    return p1 + encodeURIComponent(injectFilter(decodeURIComponent(p2), selected));
+                } catch (e) {
+                    return all;
+                }
+            });
+        }
+        var sep = url.indexOf("?") >= 0 ? "&" : "?";
+        return url + sep + "filter=" + encodeURIComponent("(equals(type,'" + SITE_TYPE + "') and " + clause + ")");
+    }
+
+    function rewriteBody(parsed, selected) {
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            return parsed;
+        }
+        var copy = {};
+        for (var k in parsed) {
+            if (Object.prototype.hasOwnProperty.call(parsed, k)) {
+                copy[k] = parsed[k];
+            }
+        }
+        copy.filter = injectFilter(parsed.filter, selected);
+        return copy;
+    }
+
+    function applyTypeahead(url, verb, tenant, headers, data, parsed, callback) {
+        var selected = selectedCountry(lastEntity);
+        if (!selected.code && selected.label) {
+            selected.code = isoFromLabel(selected.label);
+        }
+        var nextUrl = url;
+        var nextData = data;
+        if (selected.code || selected.label) {
+            var rewritten = rewriteBody(parsed, selected);
+            nextData = typeof data === "string" ? JSON.stringify(rewritten) : rewritten;
+            nextUrl = rewriteUrl(url, selected);
+        }
+        return UI.api(nextUrl, verb, tenant, headers, nextData, callback);
+    }
+
+    function setLookup(entity, name, code, label) {
+        entity.attributes = entity.attributes || {};
+        if (firstOf(entity.attributes[name], lookupCodeFrom)) {
+            return;
+        }
+        entity.attributes[name] = [
+            {
+                value: label || code,
+                lookupCode: code,
+                lookupValue: label || code
+            }
+        ];
+    }
+
+    function setSimple(entity, name, value) {
+        if (!value) {
+            return;
+        }
+        entity.attributes = entity.attributes || {};
+        if (attrText(entity.attributes[name])) {
+            return;
+        }
+        entity.attributes[name] = [{ value: value }];
+    }
+
+    function stampWrites(parsed) {
+        var entity = firstEntity(parsed);
+        if (!entity) {
+            return parsed;
+        }
+        if (entity.type === SITE_TYPE) {
+            var selected = selectedCountry(lastEntity);
+            var code = selected.code || isoFromLabel(selected.label);
+            if (code) {
+                setLookup(entity, "CountryCode", code, selected.label);
+            }
+        }
+        if (entity.type === COUNTRY_TYPE && lastStudyId) {
+            setSimple(entity, "StudyId", lastStudyId);
+        }
+        return parsed;
     }
 
     function siteCountryTokens(entity) {
@@ -210,7 +400,7 @@
         return (
             "A [POC] Site must belong to this participating country (" +
             country +
-            "). Remove sites of another country before Save."
+            "). Pick or create a site of that country only."
         );
     }
 
@@ -229,8 +419,70 @@
         return null;
     }
 
-    function quoteLookup(value) {
-        return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    function linkedSiteUri(link) {
+        var val = (link && link.value) || link || {};
+        return (
+            val.entityId ||
+            val.objectURI ||
+            (val.refEntity && (val.refEntity.objectURI || val.refEntity.uri)) ||
+            (link.refEntity && (link.refEntity.objectURI || link.refEntity.uri)) ||
+            val.uri ||
+            ""
+        );
+    }
+
+    function siteCountryFromLink(link) {
+        var val = (link && link.value) || link || {};
+        var attrs =
+            (val.attributes && val.attributes.CountryCode) ||
+            (link.attributes && link.attributes.CountryCode) ||
+            (val.refEntity && val.refEntity.attributes && val.refEntity.attributes.CountryCode);
+        if (attrs) {
+            var arr = Array.isArray(attrs) ? attrs : [attrs];
+            return firstOf(arr, lookupCodeFrom);
+        }
+        return "";
+    }
+
+    function collectSiteChecks(parsed) {
+        var checks = [];
+        var entity = firstEntity(parsed);
+        if (!entity) {
+            return checks;
+        }
+        function pushLinks(links, country) {
+            if (!country || !Array.isArray(links)) {
+                return;
+            }
+            for (var i = 0; i < links.length; i++) {
+                var siteCountry = siteCountryFromLink(links[i]);
+                if (siteCountry && !countryEquals(siteCountry, country)) {
+                    checks.push({ error: mismatchMessage(country) });
+                    return;
+                }
+                var uri = linkedSiteUri(links[i]);
+                if (uri && !siteCountry) {
+                    checks.push({ uri: uri, country: country });
+                }
+            }
+        }
+        if (entity.type === COUNTRY_TYPE) {
+            var country = countryFromEntity(entity);
+            pushLinks(entity.attributes && entity.attributes.Sites, country.code);
+        }
+        if (entity.type === STUDY_TYPE) {
+            var refs = entity.attributes && entity.attributes.ParticipatingCountries;
+            if (Array.isArray(refs)) {
+                for (var j = 0; j < refs.length; j++) {
+                    var val = refs[j].value || refs[j];
+                    var code =
+                        countryFromEntity({ attributes: val.attributes || val }).code ||
+                        firstOf(val.ParticipatingCountryCode, lookupCodeFrom);
+                    pushLinks(val.Sites || (val.attributes && val.attributes.Sites), code);
+                }
+            }
+        }
+        return checks;
     }
 
     function tenantEntitiesBase(url) {
@@ -242,103 +494,24 @@
         return u.slice(0, idx) + "/entities";
     }
 
-    function collectChecks(parsed) {
-        var checks = [];
-        var entity = firstEntity(parsed);
-        if (!entity || entity.type !== STUDY_TYPE) {
-            return checks;
-        }
-        var rows = entity.attributes && entity.attributes.ParticipatingCountry;
-        if (!Array.isArray(rows)) {
-            return checks;
-        }
-        for (var i = 0; i < rows.length; i++) {
-            var row = rows[i].value || rows[i];
-            var country = countryFromNested(rows[i]);
-            if (!country) {
-                continue;
-            }
-            var links = row.LinkedSite;
-            if (Array.isArray(links)) {
-                for (var j = 0; j < links.length; j++) {
-                    var uri = linkedSiteUri(links[j]);
-                    if (uri) {
-                        checks.push({ kind: "uri", uri: uri, country: country });
-                    }
-                }
-            }
-            var sites = row.Site;
-            if (Array.isArray(sites)) {
-                for (var k = 0; k < sites.length; k++) {
-                    var siteVal = sites[k].value || sites[k];
-                    var name = attrText(siteVal.Name);
-                    if (name) {
-                        checks.push({ kind: "name", name: name, country: country });
-                    }
-                }
-            }
-        }
-        return checks;
-    }
-
-    function loadSite(base, tenant, headers, item, onDone) {
-        var url;
-        if (item.kind === "uri") {
-            var id = String(item.uri).replace(/^entities\//, "");
-            url =
-                base +
-                "/" +
-                id +
-                "?select=uri,type,label,secondaryLabel,attributes.CountryCode,attributes.Name";
-        } else {
-            url =
-                base +
-                "?filter=" +
-                encodeURIComponent(
-                    "equals(type,'" + SITE_TYPE + "') and equals(attributes.Name,'" + quoteLookup(item.name) + "')"
-                ) +
-                "&select=uri,type,label,secondaryLabel,attributes.CountryCode,attributes.Name&max=5";
-        }
-        var settled = false;
-        function finish(body) {
-            if (settled) {
-                return;
-            }
-            settled = true;
-            onDone(body);
-        }
-        try {
-            var ret = UI.api(url, "GET", tenant, headers, null, finish);
-            if (ret && typeof ret.then === "function") {
-                ret.then(finish, function () {
-                    finish(null);
-                });
-            }
-        } catch (e) {
-            finish(null);
-        }
-    }
-
-    function firstLoaded(body) {
-        if (!body) {
-            return null;
-        }
-        if (Array.isArray(body)) {
-            return body[0] || null;
-        }
-        if (body.result && Array.isArray(body.result)) {
-            return body.result[0] || null;
-        }
-        return body;
-    }
-
     function validateThenWrite(url, verb, tenant, headers, data, parsed, callback) {
-        var checks = collectChecks(parsed);
-        if (!checks.length) {
+        var checks = collectSiteChecks(parsed);
+        for (var i = 0; i < checks.length; i++) {
+            if (checks[i].error) {
+                return blockSave(callback, checks[i].error);
+            }
+        }
+        var pending = [];
+        for (var j = 0; j < checks.length; j++) {
+            if (checks[j].uri) {
+                pending.push(checks[j]);
+            }
+        }
+        if (!pending.length) {
             return UI.api(url, verb, tenant, headers, data, callback);
         }
         var base = tenantEntitiesBase(url);
-        var left = checks.length;
+        var left = pending.length;
         var error = "";
         function done() {
             left -= 1;
@@ -350,19 +523,49 @@
             }
             return UI.api(url, verb, tenant, headers, data, callback);
         }
-        for (var i = 0; i < checks.length; i++) {
+        for (var k = 0; k < pending.length; k++) {
             (function (item) {
-                loadSite(base, tenant, headers, item, function (body) {
-                    var loaded = firstLoaded(body);
+                var id = String(item.uri).replace(/^entities\//, "");
+                var getUrl = base + "/" + id + "?select=uri,attributes.CountryCode,label,secondaryLabel";
+                var settled = false;
+                function got(body) {
+                    if (settled) {
+                        return;
+                    }
+                    settled = true;
+                    var loaded = Array.isArray(body) ? body[0] : body;
                     if (loaded && siteCountryTokens(loaded).length && !siteMatchesCountry(loaded, item.country)) {
                         error = mismatchMessage(item.country);
                     }
                     done();
-                });
-            })(checks[i]);
+                }
+                try {
+                    var ret = UI.api(getUrl, "GET", tenant, headers, null, got);
+                    if (ret && typeof ret.then === "function") {
+                        ret.then(got, done);
+                    }
+                } catch (e) {
+                    done();
+                }
+            })(pending[k]);
         }
         return null;
     }
+
+    try {
+        UI.getEntity().then(rememberEntity, function () {});
+    } catch (e) {
+        /* sandbox */
+    }
+
+    UI.onEvent(function (type, data) {
+        if (type === "updateEntity" || type === "uiAction" || type === "editAttribute") {
+            rememberEntity(data);
+            if (data && (data.lookupCode || isoFromLabel(lookupLabelFrom(data) || data.value || data))) {
+                rememberDraftCountry(data);
+            }
+        }
+    });
 
     UI.onApiRequest(function (urlOrParams, method, headers, data, callback) {
         var url = urlOf(urlOrParams);
@@ -376,8 +579,25 @@
         }
         var verb = methodOf(urlOrParams, method);
         try {
-            if (isWrite(verb) && firstEntity(parsed) && firstEntity(parsed).type === STUDY_TYPE) {
-                return validateThenWrite(url, verb, tenant, headers, data, parsed, callback);
+            UI.getEntity().then(rememberEntity, function () {});
+            if (isSiteSearch(url, parsed)) {
+                return UI.getEntity().then(
+                    function (entity) {
+                        rememberEntity(entity);
+                        return applyTypeahead(url, verb, tenant, headers, data, parsed, callback);
+                    },
+                    function () {
+                        return applyTypeahead(url, verb, tenant, headers, data, parsed, callback);
+                    }
+                );
+            }
+            if (isWrite(verb)) {
+                parsed = stampWrites(parsed);
+                data = typeof data === "string" ? JSON.stringify(parsed) : parsed;
+                var written = firstEntity(parsed);
+                if (written && (written.type === STUDY_TYPE || written.type === COUNTRY_TYPE)) {
+                    return validateThenWrite(url, verb, tenant, headers, data, parsed, callback);
+                }
             }
         } catch (err) {
             /* fall through */
